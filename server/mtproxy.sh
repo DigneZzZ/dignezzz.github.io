@@ -211,6 +211,19 @@ else
     echo -e "${GREEN}Using IP address: $PROXY_HOST${NC}"
 fi
 
+# Create initial info.txt with setup details
+mkdir -p $INSTALL_DIR
+cat > "$INSTALL_DIR/setup_info.txt" << EOL
+MTProxy Setup Information
+========================
+Setup Date: $(date)
+Selected Port: $PORT
+Selected Channel: @$CHANNEL_TAG
+External IPv4: $EXTERNAL_IP
+Proxy Host: $PROXY_HOST
+Status: Installing...
+EOL
+
 # Create systemd service
 echo -e "${YELLOW}Creating systemd service...${NC}"
 cat > "/etc/systemd/system/$SERVICE_NAME.service" << EOL
@@ -366,6 +379,12 @@ show_status() {
     echo -e "   Secret: ${GREEN}${SECRET:-unknown}${NC}"
     echo -e "   Promoted Channel: ${GREEN}@${PROMOTED_CHANNEL:-unknown}${NC}"
     
+    # Show proxy host from info.txt if available
+    if [[ -f "$INSTALL_DIR/info.txt" ]]; then
+        PROXY_HOST=$(grep "Proxy Host:" "$INSTALL_DIR/info.txt" 2>/dev/null | awk '{print $3}')
+        [[ -n "$PROXY_HOST" && "$PROXY_HOST" != "unknown" ]] && echo -e "   Proxy Host: ${GREEN}$PROXY_HOST${NC}"
+    fi
+    
     get_links
     if [[ -n "$DD_LINK" || -n "$EE_LINK" ]]; then
         echo -e "\n${YELLOW}🔗 Connection Links:${NC}"
@@ -414,8 +433,30 @@ update_info_file() {
     get_service_config
     get_links
     
+    # Determine the proxy host from links or detect it
+    PROXY_HOST=""
     if [[ -n "$DD_LINK" ]]; then
-        EXTERNAL_IP=$(echo "$DD_LINK" | cut -d'=' -f2 | cut -d'&' -f1)
+        PROXY_HOST=$(echo "$DD_LINK" | cut -d'=' -f2 | cut -d'&' -f1)
+    else
+        # Try to detect IPv4 if no links available
+        for service in "ifconfig.me" "icanhazip.com" "ipecho.net/plain"; do
+            if DETECTED_IP=$(curl -s --connect-timeout 5 "$service" 2>/dev/null) && [[ -n "$DETECTED_IP" ]]; then
+                if [[ $DETECTED_IP =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+                    IFS='.' read -ra ADDR <<< "$DETECTED_IP"
+                    valid=true
+                    for i in "${ADDR[@]}"; do
+                        if [[ $i -gt 255 || $i -lt 0 ]]; then
+                            valid=false
+                            break
+                        fi
+                    done
+                    if [[ $valid == true ]]; then
+                        PROXY_HOST="$DETECTED_IP"
+                        break
+                    fi
+                fi
+            fi
+        done
     fi
     
     mkdir -p "$INSTALL_DIR"
@@ -429,10 +470,11 @@ Proxy Type: Python MTProxy
 
 Connection Details:
 ------------------
+Proxy Host: ${PROXY_HOST:-unknown}
 External IP: ${EXTERNAL_IP:-unknown}
 Port: ${PORT:-unknown}
 Base Secret: ${SECRET:-unknown}
-Promoted Channel: @${CHANNEL_TAG}
+Promoted Channel: @${PROMOTED_CHANNEL:-${CHANNEL_TAG:-unknown}}
 
 Working Connection Links:
 ------------------------
