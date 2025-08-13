@@ -162,8 +162,20 @@ echo -e "${YELLOW}Getting external IP...${NC}"
 EXTERNAL_IP=""
 for service in "ifconfig.me" "icanhazip.com" "ipecho.net/plain"; do
     if EXTERNAL_IP=$(curl -s --connect-timeout 10 "$service" 2>/dev/null) && [[ -n "$EXTERNAL_IP" ]]; then
+        # Check if it's a valid IPv4 address
         if [[ $EXTERNAL_IP =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
-            break
+            # Additional validation for IPv4 ranges
+            IFS='.' read -ra ADDR <<< "$EXTERNAL_IP"
+            valid=true
+            for i in "${ADDR[@]}"; do
+                if [[ $i -gt 255 || $i -lt 0 ]]; then
+                    valid=false
+                    break
+                fi
+            done
+            if [[ $valid == true ]]; then
+                break
+            fi
         fi
     fi
     EXTERNAL_IP=""
@@ -171,6 +183,32 @@ done
 
 if [[ -z "$EXTERNAL_IP" ]]; then
     EXTERNAL_IP="YOUR_SERVER_IP"
+    echo -e "${RED}Failed to detect external IPv4 address${NC}"
+else
+    echo -e "${GREEN}Detected external IPv4: $EXTERNAL_IP${NC}"
+fi
+
+# Ask for domain (optional)
+echo -e "\n${YELLOW}🌐 Domain Setup (Optional):${NC}"
+echo -e "${CYAN}You can use a domain name instead of IP address for better user experience.${NC}"
+echo -e "${CYAN}Examples: proxy.example.com, vpn.mydomain.org${NC}"
+echo -e "${CYAN}Leave empty to use IP address: $EXTERNAL_IP${NC}"
+echo ""
+read -p "Enter domain name (optional): " USER_DOMAIN
+
+if [[ -n "$USER_DOMAIN" ]]; then
+    # Validate domain format (basic check)
+    if [[ $USER_DOMAIN =~ ^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?)*$ ]]; then
+        PROXY_HOST="$USER_DOMAIN"
+        echo -e "${GREEN}Using domain: $PROXY_HOST${NC}"
+        echo -e "${YELLOW}Note: Make sure your domain points to $EXTERNAL_IP${NC}"
+    else
+        echo -e "${RED}Invalid domain format. Using IP address instead.${NC}"
+        PROXY_HOST="$EXTERNAL_IP"
+    fi
+else
+    PROXY_HOST="$EXTERNAL_IP"
+    echo -e "${GREEN}Using IP address: $PROXY_HOST${NC}"
 fi
 
 # Create systemd service
@@ -267,12 +305,46 @@ get_links() {
         if [[ -z "$DD_LINK" || -z "$EE_LINK" ]]; then
             get_service_config
             if [[ -n "$PORT" && -n "$SECRET" ]]; then
-                # Get external IP
-                EXTERNAL_IP=$(curl -s --connect-timeout 5 ifconfig.me 2>/dev/null || echo "YOUR_SERVER_IP")
+                # Get external IP (IPv4 only) or use domain from info.txt
+                PROXY_HOST=""
+                
+                # Try to get host from existing info.txt
+                if [[ -f "$INSTALL_DIR/info.txt" ]]; then
+                    PROXY_HOST=$(grep "Proxy Host:" "$INSTALL_DIR/info.txt" 2>/dev/null | awk '{print $3}')
+                fi
+                
+                # If no host found, detect IPv4
+                if [[ -z "$PROXY_HOST" ]]; then
+                    for service in "ifconfig.me" "icanhazip.com" "ipecho.net/plain"; do
+                        if DETECTED_IP=$(curl -s --connect-timeout 5 "$service" 2>/dev/null) && [[ -n "$DETECTED_IP" ]]; then
+                            # Check if it's a valid IPv4 address
+                            if [[ $DETECTED_IP =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+                                # Additional validation for IPv4 ranges
+                                IFS='.' read -ra ADDR <<< "$DETECTED_IP"
+                                valid=true
+                                for i in "${ADDR[@]}"; do
+                                    if [[ $i -gt 255 || $i -lt 0 ]]; then
+                                        valid=false
+                                        break
+                                    fi
+                                done
+                                if [[ $valid == true ]]; then
+                                    PROXY_HOST="$DETECTED_IP"
+                                    break
+                                fi
+                            fi
+                        fi
+                    done
+                fi
+                
+                # Fallback
+                if [[ -z "$PROXY_HOST" ]]; then
+                    PROXY_HOST="YOUR_SERVER_IP"
+                fi
                 
                 # Generate standard links with dd and ee prefixes
-                DD_LINK="tg://proxy?server=$EXTERNAL_IP&port=$PORT&secret=dd$SECRET"
-                EE_LINK="tg://proxy?server=$EXTERNAL_IP&port=$PORT&secret=ee${SECRET}7777772e676f6f676c652e636f6d"
+                DD_LINK="tg://proxy?server=$PROXY_HOST&port=$PORT&secret=dd$SECRET"
+                EE_LINK="tg://proxy?server=$PROXY_HOST&port=$PORT&secret=ee${SECRET}7777772e676f6f676c652e636f6d"
             fi
         fi
     fi
