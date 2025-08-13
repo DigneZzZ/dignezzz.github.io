@@ -5,8 +5,8 @@
 # and creates management utility in /usr/local/bin/mtproxy
 #
 # Usage:
-#   ./final-mtproxy-install-fixed.sh          - Install MTProxy
-#   ./final-mtproxy-install-fixed.sh uninstall - Remove MTProxy completely
+#   ./mt-fixed.sh          - Install MTProxy
+#   ./mt-fixed.sh uninstall - Remove MTProxy completely
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -16,7 +16,7 @@ CYAN='\033[0;36m'
 BOLD='\033[1m'
 NC='\033[0m'
 
-echo -e "${BLUE}MTProxy Final Installation (Fixed)${NC}\n"
+echo -e "${BLUE}MTProxy Installation (Fixed)${NC}\n"
 
 # Check for uninstall option
 if [[ "$1" == "uninstall" ]]; then
@@ -157,11 +157,11 @@ else
     echo -e "${GREEN}Generated new secret: $USER_SECRET${NC}"
 fi
 
-# Get external IP
-echo -e "${YELLOW}Getting external IP...${NC}"
+# Get external IP (IPv4 only)
+echo -e "${YELLOW}Getting external IPv4 address...${NC}"
 EXTERNAL_IP=""
-for service in "ifconfig.me" "icanhazip.com" "ipecho.net/plain"; do
-    if EXTERNAL_IP=$(curl -s --connect-timeout 10 "$service" 2>/dev/null) && [[ -n "$EXTERNAL_IP" ]]; then
+for service in "ipv4.icanhazip.com" "ipv4.ident.me" "ifconfig.me/ip" "api.ipify.org"; do
+    if EXTERNAL_IP=$(curl -4 -s --connect-timeout 10 "$service" 2>/dev/null) && [[ -n "$EXTERNAL_IP" ]]; then
         # Check if it's a valid IPv4 address
         if [[ $EXTERNAL_IP =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
             # Additional validation for IPv4 ranges
@@ -184,6 +184,7 @@ done
 if [[ -z "$EXTERNAL_IP" ]]; then
     EXTERNAL_IP="YOUR_SERVER_IP"
     echo -e "${RED}Failed to detect external IPv4 address${NC}"
+    echo -e "${YELLOW}Please manually check your IPv4 with: curl -4 ifconfig.me${NC}"
 else
     echo -e "${GREEN}Detected external IPv4: $EXTERNAL_IP${NC}"
 fi
@@ -211,6 +212,22 @@ else
     echo -e "${GREEN}Using IP address: $PROXY_HOST${NC}"
 fi
 
+# TLS Domain setup for better security
+echo -e "\n${YELLOW}🔒 TLS Domain Setup:${NC}"
+echo -e "${CYAN}MTProxy uses a domain for TLS certificate masking to avoid detection.${NC}"
+echo -e "${CYAN}Using random existing domains is more secure than default google.com${NC}"
+echo -e "${CYAN}Examples: github.com, cloudflare.com, microsoft.com, amazon.com${NC}"
+echo ""
+
+# List of good TLS domains
+TLS_DOMAINS=("github.com" "cloudflare.com" "microsoft.com" "amazon.com" "yahoo.com" "wikipedia.org" "stackoverflow.com" "reddit.com")
+RANDOM_DOMAIN=${TLS_DOMAINS[$RANDOM % ${#TLS_DOMAINS[@]}]}
+
+read -p "Enter TLS domain for masking (default: $RANDOM_DOMAIN): " USER_TLS_DOMAIN
+TLS_DOMAIN=${USER_TLS_DOMAIN:-$RANDOM_DOMAIN}
+
+echo -e "${GREEN}Using TLS domain: $TLS_DOMAIN${NC}"
+
 # Create initial info.txt with setup details
 mkdir -p $INSTALL_DIR
 cat > "$INSTALL_DIR/setup_info.txt" << EOL
@@ -221,6 +238,7 @@ Selected Port: $PORT
 Selected Channel: @$CHANNEL_TAG
 External IPv4: $EXTERNAL_IP
 Proxy Host: $PROXY_HOST
+TLS Domain: $TLS_DOMAIN
 Status: Installing...
 EOL
 
@@ -230,6 +248,8 @@ cat > "/etc/systemd/system/$SERVICE_NAME.service" << EOL
 [Unit]
 Description=MTProxy Telegram Proxy (Python)
 After=network.target
+Wants=network-online.target
+After=network-online.target
 
 [Service]
 Type=simple
@@ -237,8 +257,27 @@ User=root
 WorkingDirectory=$INSTALL_DIR
 ExecStart=python3 $INSTALL_DIR/mtprotoproxy.py $PORT $USER_SECRET
 Environment=TAG=$CHANNEL_TAG
-Restart=on-failure
-RestartSec=5
+Environment=TLS_DOMAIN=$TLS_DOMAIN
+Environment=MASK_HOST=$TLS_DOMAIN
+Environment=USERS_FILE=$INSTALL_DIR/users.txt
+Restart=always
+RestartSec=10
+StartLimitBurst=3
+StartLimitIntervalSec=60
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+# Resource limits for stability
+LimitNOFILE=65536
+LimitNPROC=4096
+
+# Security settings
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=$INSTALL_DIR
+PrivateTmp=true
 
 [Install]
 WantedBy=multi-user.target
@@ -273,6 +312,12 @@ NC='\033[0m'
 INSTALL_DIR="/opt/MTProxy"
 SERVICE_NAME="mtproxy"
 
+# Function to convert domain to hex for TLS link
+domain_to_hex() {
+    local domain="$1"
+    echo -n "$domain" | xxd -p | tr -d '\n'
+}
+
 show_help() {
     echo -e "${BLUE}MTProxy Management Utility${NC}\n"
     echo "Usage: mtproxy [command]"
@@ -303,22 +348,22 @@ get_links() {
         # Get recent logs and extract full proxy URLs
         LOGS=$(journalctl -u $SERVICE_NAME --no-pager -n 20 --since "5 minutes ago")
         
-        # Extract the full tg://proxy URLs from logs
-        DD_LINK=$(echo "$LOGS" | grep -o "tg://proxy[^[:space:]]*secret=dd[^[:space:]]*" | tail -1)
-        EE_LINK=$(echo "$LOGS" | grep -o "tg://proxy[^[:space:]]*secret=ee[^[:space:]]*" | tail -1)
+        # Extract the full tg://proxy URLs from logs with IPv4 addresses only
+        DD_LINK=$(echo "$LOGS" | grep -o "tg://proxy[^[:space:]]*secret=dd[^[:space:]]*" | grep -E "server=[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}" | tail -1)
+        EE_LINK=$(echo "$LOGS" | grep -o "tg://proxy[^[:space:]]*secret=ee[^[:space:]]*" | grep -E "server=[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}" | tail -1)
         
-        # If no recent links found, check all logs
+        # If no recent IPv4 links found, check all logs for IPv4 only
         if [[ -z "$DD_LINK" || -z "$EE_LINK" ]]; then
             LOGS=$(journalctl -u $SERVICE_NAME --no-pager -n 50)
-            DD_LINK=$(echo "$LOGS" | grep -o "tg://proxy[^[:space:]]*secret=dd[^[:space:]]*" | tail -1)
-            EE_LINK=$(echo "$LOGS" | grep -o "tg://proxy[^[:space:]]*secret=ee[^[:space:]]*" | tail -1)
+            DD_LINK=$(echo "$LOGS" | grep -o "tg://proxy[^[:space:]]*secret=dd[^[:space:]]*" | grep -E "server=[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}" | tail -1)
+            EE_LINK=$(echo "$LOGS" | grep -o "tg://proxy[^[:space:]]*secret=ee[^[:space:]]*" | grep -E "server=[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}" | tail -1)
         fi
         
-        # If still no links found, generate them manually
+        # If still no IPv4 links found, generate them manually
         if [[ -z "$DD_LINK" || -z "$EE_LINK" ]]; then
             get_service_config
             if [[ -n "$PORT" && -n "$SECRET" ]]; then
-                # Get external IP (IPv4 only) or use domain from info.txt
+                # Get external IPv4 or use domain from info.txt
                 PROXY_HOST=""
                 
                 # Try to get host from existing info.txt
@@ -326,10 +371,10 @@ get_links() {
                     PROXY_HOST=$(grep "Proxy Host:" "$INSTALL_DIR/info.txt" 2>/dev/null | awk '{print $3}')
                 fi
                 
-                # If no host found, detect IPv4
+                # If no host found, detect IPv4 only
                 if [[ -z "$PROXY_HOST" ]]; then
-                    for service in "ifconfig.me" "icanhazip.com" "ipecho.net/plain"; do
-                        if DETECTED_IP=$(curl -s --connect-timeout 5 "$service" 2>/dev/null) && [[ -n "$DETECTED_IP" ]]; then
+                    for service in "ipv4.icanhazip.com" "ipv4.ident.me" "ifconfig.me/ip" "api.ipify.org"; do
+                        if DETECTED_IP=$(curl -4 -s --connect-timeout 5 "$service" 2>/dev/null) && [[ -n "$DETECTED_IP" ]]; then
                             # Check if it's a valid IPv4 address
                             if [[ $DETECTED_IP =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
                                 # Additional validation for IPv4 ranges
@@ -355,9 +400,18 @@ get_links() {
                     PROXY_HOST="YOUR_SERVER_IP"
                 fi
                 
+                # Get TLS domain from service config or use default
+                if [[ -z "$TLS_DOMAIN" ]]; then
+                    TLS_DOMAIN=$(grep "Environment=TLS_DOMAIN=" /etc/systemd/system/mtproxy.service 2>/dev/null | cut -d'=' -f3)
+                    [[ -z "$TLS_DOMAIN" ]] && TLS_DOMAIN="github.com"
+                fi
+                
+                # Convert TLS domain to hex
+                TLS_DOMAIN_HEX=$(domain_to_hex "$TLS_DOMAIN")
+                
                 # Generate standard links with dd and ee prefixes
                 DD_LINK="tg://proxy?server=$PROXY_HOST&port=$PORT&secret=dd$SECRET"
-                EE_LINK="tg://proxy?server=$PROXY_HOST&port=$PORT&secret=ee${SECRET}7777772e676f6f676c652e636f6d"
+                EE_LINK="tg://proxy?server=$PROXY_HOST&port=$PORT&secret=ee${SECRET}${TLS_DOMAIN_HEX}"
             fi
         fi
     fi
@@ -439,8 +493,8 @@ update_info_file() {
         PROXY_HOST=$(echo "$DD_LINK" | cut -d'=' -f2 | cut -d'&' -f1)
     else
         # Try to detect IPv4 if no links available
-        for service in "ifconfig.me" "icanhazip.com" "ipecho.net/plain"; do
-            if DETECTED_IP=$(curl -s --connect-timeout 5 "$service" 2>/dev/null) && [[ -n "$DETECTED_IP" ]]; then
+        for service in "ipv4.icanhazip.com" "ipv4.ident.me" "ifconfig.me/ip" "api.ipify.org"; do
+            if DETECTED_IP=$(curl -4 -s --connect-timeout 5 "$service" 2>/dev/null) && [[ -n "$DETECTED_IP" ]]; then
                 if [[ $DETECTED_IP =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
                     IFS='.' read -ra ADDR <<< "$DETECTED_IP"
                     valid=true
