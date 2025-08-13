@@ -9,6 +9,7 @@
 | f2b-e.sh | `bash <(wget -qO- https://dignezzz.github.io/server/f2b-e.sh)` |
 | f2b.sh | `bash <(wget -qO- https://dignezzz.github.io/server/f2b.sh)` |
 | init.sh | `bash <(wget -qO- https://dignezzz.github.io/server/init.sh)` |
+| mtproxy.sh | `bash <(wget -qO- https://dignezzz.github.io/server/mtproxy.sh)` |
 | mtu.sh | `bash <(wget -qO- https://dignezzz.github.io/server/mtu.sh)` |
 | reality.sh | `bash <(wget -qO- https://dignezzz.github.io/server/reality.sh)` |
 | safe-cleanup.sh | `bash <(wget -qO- https://dignezzz.github.io/server/safe-cleanup.sh)` |
@@ -23,4 +24,4 @@
 | ufw-copy.sh | `bash <(wget -qO- https://dignezzz.github.io/server/ufw-copy.sh)` |
 | unlimit_server.sh | `bash <(wget -qO- https://dignezzz.github.io/server/unlimit_server.sh)` |
 
-_Last updated at Wed Aug 13 12:14:46 MSK 2025_ 
+_Last updated at Thu Aug 14 01:33:56 MSK 2025_ 
