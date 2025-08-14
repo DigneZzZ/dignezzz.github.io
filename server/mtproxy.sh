@@ -18,6 +18,12 @@ NC='\033[0m'
 
 echo -e "${BLUE}MTProxy Installation (Fixed)${NC}\n"
 
+# Require root
+if [[ $EUID -ne 0 ]]; then
+    echo -e "${RED}This installer must be run as root (use sudo).${NC}"
+    exit 1
+fi
+
 # Check for uninstall option
 if [[ "$1" == "uninstall" ]]; then
     echo -e "${YELLOW}🗑️  MTProxy Uninstallation${NC}\n"
@@ -110,26 +116,43 @@ fi
 INSTALL_DIR="/opt/MTProxy"
 SERVICE_NAME="mtproxy"
 DEFAULT_PORT=9443
-DEFAULT_CHANNEL="vsemvpn_bot"
+DEFAULT_CHANNEL="vsemvpn_com"
 
 # Get user input
 read -p "Enter proxy port (default: $DEFAULT_PORT): " USER_PORT
 PORT=${USER_PORT:-$DEFAULT_PORT}
 
 echo -e "\n${YELLOW}📢 Channel Promotion Setup:${NC}"
-echo -e "${CYAN}MTProxy can promote a Telegram channel/bot to users who connect through your proxy.${NC}"
-echo -e "${CYAN}This helps monetize your proxy and provides additional features.${NC}"
-echo -e "${CYAN}Examples: @your_channel, @your_bot, mychannel (without @)${NC}"
+echo -e "${CYAN}You can promote your Telegram channel to users connecting through your proxy.${NC}"
+echo -e "${CYAN}Options:${NC}"
+echo -e "${CYAN}  1. Set default channel now (works immediately)${NC}"
+echo -e "${CYAN}  2. Configure later via @MTProxybot (after registration, higher priority)${NC}"
 echo ""
-read -p "Enter channel/bot username to promote (default: $DEFAULT_CHANNEL): " USER_CHANNEL
+read -p "Enter channel/bot username to promote (default: $DEFAULT_CHANNEL, leave empty for none): " USER_CHANNEL
 CHANNEL_TAG=${USER_CHANNEL:-$DEFAULT_CHANNEL}
+
+if [[ "$CHANNEL_TAG" == "$DEFAULT_CHANNEL" ]]; then
+    echo -e "${CYAN}Using default channel @$CHANNEL_TAG. You can override this via @MTProxybot later.${NC}"
+elif [[ -z "$CHANNEL_TAG" ]]; then
+    CHANNEL_TAG=""
+    echo -e "${CYAN}No default channel set. Configure promotion via @MTProxybot after registration.${NC}"
+else
+    echo -e "${CYAN}Using channel @$CHANNEL_TAG. You can change this via @MTProxybot later.${NC}"
+fi
 
 echo -e "\n${YELLOW}Installing MTProxy native service...${NC}"
 
 # Install dependencies
 echo -e "${YELLOW}Installing dependencies...${NC}"
-apt update -qq
-apt install -y git curl python3 python3-pip xxd
+if command -v apt >/dev/null 2>&1; then
+    apt update -qq
+    # Ensure xxd is available (on some systems it is provided by vim-common)
+    apt install -y git curl python3 python3-pip xxd || apt install -y vim-common
+else
+    echo -e "${RED}apt not found. This script currently supports Debian/Ubuntu (apt).${NC}"
+    echo -e "${YELLOW}Install dependencies manually: git curl python3 python3-pip xxd (or vim-common).${NC}"
+    exit 1
+fi
 
 # Create installation directory
 mkdir -p $INSTALL_DIR
@@ -202,7 +225,14 @@ if [[ -n "$USER_DOMAIN" ]]; then
     if [[ $USER_DOMAIN =~ ^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?)*$ ]]; then
         PROXY_HOST="$USER_DOMAIN"
         echo -e "${GREEN}Using domain: $PROXY_HOST${NC}"
-        echo -e "${YELLOW}Note: Make sure your domain points to $EXTERNAL_IP${NC}"
+        echo -e "${YELLOW}Checking DNS for domain...${NC}"
+        DOMAIN_IP=$(getent ahostsv4 "$PROXY_HOST" 2>/dev/null | awk '/STREAM/ {print $1; exit}')
+        if [[ -n "$DOMAIN_IP" && -n "$EXTERNAL_IP" && "$DOMAIN_IP" != "$EXTERNAL_IP" ]]; then
+            echo -e "${YELLOW}Warning:${NC} DNS ($PROXY_HOST -> ${DOMAIN_IP}) doesn't match detected external IP (${EXTERNAL_IP})."
+            echo -e "${YELLOW}Make sure your domain A-record points to ${EXTERNAL_IP}.${NC}"
+        else
+            echo -e "${GREEN}DNS looks ok.${NC}"
+        fi
     else
         echo -e "${RED}Invalid domain format. Using IP address instead.${NC}"
         PROXY_HOST="$EXTERNAL_IP"
@@ -228,9 +258,9 @@ TLS_DOMAIN=${USER_TLS_DOMAIN:-$RANDOM_DOMAIN}
 
 echo -e "${GREEN}Using TLS domain: $TLS_DOMAIN${NC}"
 
-# Create initial info.txt with setup details
+# Create initial info.txt with setup details (persist chosen host)
 mkdir -p $INSTALL_DIR
-cat > "$INSTALL_DIR/setup_info.txt" << EOL
+cat > "$INSTALL_DIR/info.txt" << EOL
 MTProxy Setup Information
 ========================
 Setup Date: $(date)
@@ -239,6 +269,7 @@ Selected Channel: @$CHANNEL_TAG
 External IPv4: $EXTERNAL_IP
 Proxy Host: $PROXY_HOST
 TLS Domain: $TLS_DOMAIN
+Registration Secret (32 hex, for @MTProxybot): $USER_SECRET
 Status: Installing...
 EOL
 
@@ -259,6 +290,7 @@ ExecStart=python3 $INSTALL_DIR/mtprotoproxy.py $PORT $USER_SECRET
 Environment=TAG=$CHANNEL_TAG
 Environment=TLS_DOMAIN=$TLS_DOMAIN
 Environment=MASK_HOST=$TLS_DOMAIN
+Environment=FAKE_TLS_DOMAIN=$TLS_DOMAIN
 Environment=USERS_FILE=$INSTALL_DIR/users.txt
 Restart=always
 RestartSec=10
@@ -330,6 +362,7 @@ show_help() {
     echo -e "  ${GREEN}logs${NC}      - Show service logs"
     echo -e "  ${GREEN}links${NC}     - Show connection links only"
     echo -e "  ${GREEN}info${NC}      - Show detailed configuration"
+    echo -e "  ${GREEN}test${NC}      - Test proxy connectivity"
     echo -e "  ${GREEN}help${NC}      - Show this help"
 }
 
@@ -348,19 +381,21 @@ get_links() {
         # Get recent logs and extract full proxy URLs
         LOGS=$(journalctl -u $SERVICE_NAME --no-pager -n 20 --since "5 minutes ago")
         
-        # Extract the full tg://proxy URLs from logs with IPv4 addresses only
-        DD_LINK=$(echo "$LOGS" | grep -o "tg://proxy[^[:space:]]*secret=dd[^[:space:]]*" | grep -E "server=[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}" | tail -1)
-        EE_LINK=$(echo "$LOGS" | grep -o "tg://proxy[^[:space:]]*secret=ee[^[:space:]]*" | grep -E "server=[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}" | tail -1)
+    # Extract the full tg://proxy URLs from logs with IPv4 addresses only
+    ANY_LINK=$(echo "$LOGS" | grep -o "tg://proxy[^[:space:]]*secret=[^[:space:]]*" | grep -E "server=[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}" | tail -1)
+    DD_LINK=$(echo "$LOGS" | grep -o "tg://proxy[^[:space:]]*secret=dd[^[:space:]]*" | grep -E "server=[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}" | tail -1)
+    EE_LINK=$(echo "$LOGS" | grep -o "tg://proxy[^[:space:]]*secret=ee[^[:space:]]*" | grep -E "server=[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}" | tail -1)
         
         # If no recent IPv4 links found, check all logs for IPv4 only
         if [[ -z "$DD_LINK" || -z "$EE_LINK" ]]; then
             LOGS=$(journalctl -u $SERVICE_NAME --no-pager -n 50)
+            ANY_LINK=$(echo "$LOGS" | grep -o "tg://proxy[^[:space:]]*secret=[^[:space:]]*" | grep -E "server=[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}" | tail -1)
             DD_LINK=$(echo "$LOGS" | grep -o "tg://proxy[^[:space:]]*secret=dd[^[:space:]]*" | grep -E "server=[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}" | tail -1)
             EE_LINK=$(echo "$LOGS" | grep -o "tg://proxy[^[:space:]]*secret=ee[^[:space:]]*" | grep -E "server=[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}" | tail -1)
         fi
         
         # If still no IPv4 links found, generate them manually
-        if [[ -z "$DD_LINK" || -z "$EE_LINK" ]]; then
+        if [[ -z "$ANY_LINK" || -z "$EE_LINK" ]]; then
             get_service_config
             if [[ -n "$PORT" && -n "$SECRET" ]]; then
                 # Get external IPv4 or use domain from info.txt
@@ -409,8 +444,48 @@ get_links() {
                 # Convert TLS domain to hex
                 TLS_DOMAIN_HEX=$(domain_to_hex "$TLS_DOMAIN")
                 
-                # Generate standard links with dd and ee prefixes
-                DD_LINK="tg://proxy?server=$PROXY_HOST&port=$PORT&secret=dd$SECRET"
+                # Generate links: plain (no prefix), dd and ee
+                PLAIN_LINK="tg://proxy?server=$PROXY_HOST&port=$PORT&secret=${SECRET}"
+                DD_LINK="tg://proxy?server=$PROXY_HOST&port=$PORT&secret=dd${SECRET}"
+                EE_LINK="tg://proxy?server=$PROXY_HOST&port=$PORT&secret=ee${SECRET}${TLS_DOMAIN_HEX}"
+            fi
+        fi
+
+        # Always regenerate all links using the current SECRET from service config
+        # This ensures consistency between Plain/DD/EE links
+        get_service_config
+        if [[ -n "$PORT" && -n "$SECRET" ]]; then
+            # Determine host from existing links or fallback detection
+            PROXY_HOST=""
+            LINK_SRC="${ANY_LINK:-${DD_LINK:-$EE_LINK}}"
+            if [[ -n "$LINK_SRC" ]]; then
+                PROXY_HOST=$(echo "$LINK_SRC" | sed -E 's/.*server=([^&]+).*/\1/')
+            fi
+            
+            # Fallback to info.txt or IP detection
+            if [[ -z "$PROXY_HOST" ]]; then
+                if [[ -f "$INSTALL_DIR/info.txt" ]]; then
+                    PROXY_HOST=$(grep "Proxy Host:" "$INSTALL_DIR/info.txt" 2>/dev/null | awk '{print $3}')
+                fi
+                if [[ -z "$PROXY_HOST" ]]; then
+                    for service in "ipv4.icanhazip.com" "ipv4.ident.me"; do
+                        if DETECTED_IP=$(curl -4 -s --connect-timeout 3 "$service" 2>/dev/null) && [[ $DETECTED_IP =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+                            PROXY_HOST="$DETECTED_IP"
+                            break
+                        fi
+                    done
+                fi
+            fi
+            
+            if [[ -n "$PROXY_HOST" ]]; then
+                # Get TLS domain
+                TLS_DOMAIN=$(grep "Environment=TLS_DOMAIN=" /etc/systemd/system/mtproxy.service 2>/dev/null | cut -d'=' -f3)
+                [[ -z "$TLS_DOMAIN" ]] && TLS_DOMAIN="github.com"
+                TLS_DOMAIN_HEX=$(domain_to_hex "$TLS_DOMAIN")
+                
+                # Generate consistent links with current SECRET
+                PLAIN_LINK="tg://proxy?server=$PROXY_HOST&port=$PORT&secret=${SECRET}"
+                DD_LINK="tg://proxy?server=$PROXY_HOST&port=$PORT&secret=dd${SECRET}"
                 EE_LINK="tg://proxy?server=$PROXY_HOST&port=$PORT&secret=ee${SECRET}${TLS_DOMAIN_HEX}"
             fi
         fi
@@ -431,6 +506,7 @@ show_status() {
     echo -e "${YELLOW}📊 Configuration:${NC}"
     echo -e "   Port: ${GREEN}${PORT:-unknown}${NC}"
     echo -e "   Secret: ${GREEN}${SECRET:-unknown}${NC}"
+    echo -e "   Registration Secret (plain for @MTProxybot): ${GREEN}${SECRET:-unknown}${NC}"
     echo -e "   Promoted Channel: ${GREEN}@${PROMOTED_CHANNEL:-unknown}${NC}"
     
     # Show proxy host from info.txt if available
@@ -440,13 +516,15 @@ show_status() {
     fi
     
     get_links
-    if [[ -n "$DD_LINK" || -n "$EE_LINK" ]]; then
+    if [[ -n "$ANY_LINK" || -n "$PLAIN_LINK" || -n "$DD_LINK" || -n "$EE_LINK" ]]; then
         echo -e "\n${YELLOW}🔗 Connection Links:${NC}"
-        [[ -n "$DD_LINK" ]] && echo -e "${GREEN}Standard:${NC} $DD_LINK"
+        [[ -n "$PLAIN_LINK" ]] && echo -e "${GREEN}Plain (for @MTProxybot):${NC} $PLAIN_LINK"
+        [[ -n "$DD_LINK" ]] && echo -e "${GREEN}DD (legacy clients):${NC} $DD_LINK"
         [[ -n "$EE_LINK" ]] && echo -e "${GREEN}TLS:${NC}      $EE_LINK"
         
         echo -e "\n${YELLOW}🌐 Web Links:${NC}"
-        [[ -n "$DD_LINK" ]] && echo -e "${GREEN}Standard:${NC} $(echo "$DD_LINK" | sed 's/tg:/https:\/\/t.me/')"
+        [[ -n "$PLAIN_LINK" ]] && echo -e "${GREEN}Plain:${NC} $(echo "$PLAIN_LINK" | sed 's/tg:/https:\/\/t.me/')"
+        [[ -n "$DD_LINK" ]] && echo -e "${GREEN}DD:${NC} $(echo "$DD_LINK" | sed 's/tg:/https:\/\/t.me/')"
         [[ -n "$EE_LINK" ]] && echo -e "${GREEN}TLS:${NC}      $(echo "$EE_LINK" | sed 's/tg:/https:\/\/t.me/')"
     else
         echo -e "\n${RED}❌ No links available${NC}"
@@ -455,8 +533,9 @@ show_status() {
 
 show_links() {
     get_links
-    if [[ -n "$DD_LINK" || -n "$EE_LINK" ]]; then
+    if [[ -n "$PLAIN_LINK" || -n "$DD_LINK" || -n "$EE_LINK" ]]; then
         echo -e "${YELLOW}🔗 MTProxy Connection Links:${NC}"
+        [[ -n "$PLAIN_LINK" ]] && echo "$PLAIN_LINK"
         [[ -n "$DD_LINK" ]] && echo "$DD_LINK"
         [[ -n "$EE_LINK" ]] && echo "$EE_LINK"
     else
@@ -489,8 +568,12 @@ update_info_file() {
     
     # Determine the proxy host from links or detect it
     PROXY_HOST=""
-    if [[ -n "$DD_LINK" ]]; then
-        PROXY_HOST=$(echo "$DD_LINK" | cut -d'=' -f2 | cut -d'&' -f1)
+    if [[ -n "$PLAIN_LINK" ]]; then
+        PROXY_HOST=$(echo "$PLAIN_LINK" | sed -E 's/.*server=([^&]+).*/\1/')
+    elif [[ -n "$DD_LINK" ]]; then
+        PROXY_HOST=$(echo "$DD_LINK" | sed -E 's/.*server=([^&]+).*/\1/')
+    elif [[ -n "$ANY_LINK" ]]; then
+        PROXY_HOST=$(echo "$ANY_LINK" | sed -E 's/.*server=([^&]+).*/\1/')
     else
         # Try to detect IPv4 if no links available
         for service in "ipv4.icanhazip.com" "ipv4.ident.me" "ifconfig.me/ip" "api.ipify.org"; do
@@ -528,16 +611,19 @@ Proxy Host: ${PROXY_HOST:-unknown}
 External IP: ${EXTERNAL_IP:-unknown}
 Port: ${PORT:-unknown}
 Base Secret: ${SECRET:-unknown}
+Registration Secret (plain, for @MTProxybot): ${SECRET:-unknown}
 Promoted Channel: @${PROMOTED_CHANNEL:-${CHANNEL_TAG:-unknown}}
 
 Working Connection Links:
 ------------------------
-Standard Link: ${DD_LINK:-Not available}
+Plain Link (for registration): ${PLAIN_LINK:-Not available}
+DD Link: ${DD_LINK:-Not available}
 TLS Link: ${EE_LINK:-Not available}
 
 Web Browser Links:
 -----------------
-Standard: $(echo "${DD_LINK:-Not available}" | sed 's/tg:/https:\/\/t.me/')
+Plain: $(echo "${PLAIN_LINK:-Not available}" | sed 's/tg:/https:\/\/t.me/')
+DD: $(echo "${DD_LINK:-Not available}" | sed 's/tg:/https:\/\/t.me/')
 TLS: $(echo "${EE_LINK:-Not available}" | sed 's/tg:/https:\/\/t.me/')
 
 Service Management:
@@ -600,6 +686,46 @@ case "${1:-status}" in
         ;;
     "info")
         show_info
+        ;;
+    "test")
+        echo -e "${YELLOW}Testing MTProxy connectivity...${NC}"
+        get_service_config
+        if [[ -n "$PORT" ]]; then
+            echo -e "Testing port $PORT connectivity..."
+            if command -v nc >/dev/null 2>&1; then
+                if timeout 5 nc -z localhost "$PORT" 2>/dev/null; then
+                    echo -e "${GREEN}✅ Port $PORT is open locally${NC}"
+                else
+                    echo -e "${RED}❌ Port $PORT is not accessible locally${NC}"
+                fi
+            elif command -v telnet >/dev/null 2>&1; then
+                if timeout 5 bash -c "echo | telnet localhost $PORT" 2>/dev/null | grep -q "Connected"; then
+                    echo -e "${GREEN}✅ Port $PORT is open locally${NC}"
+                else
+                    echo -e "${RED}❌ Port $PORT is not accessible locally${NC}"
+                fi
+            else
+                echo -e "${YELLOW}⚠️  nc/telnet not available for port testing${NC}"
+            fi
+            
+            # Check if service is actually listening
+            if ss -tlnp 2>/dev/null | grep -q ":$PORT "; then
+                echo -e "${GREEN}✅ Service is listening on port $PORT${NC}"
+            else
+                echo -e "${RED}❌ No service listening on port $PORT${NC}"
+            fi
+            
+            # Check logs for errors
+            RECENT_ERRORS=$(journalctl -u mtproxy --no-pager -n 10 --since "10 minutes ago" | grep -i "error\|fail\|exception" | tail -3)
+            if [[ -n "$RECENT_ERRORS" ]]; then
+                echo -e "${RED}Recent errors in logs:${NC}"
+                echo "$RECENT_ERRORS"
+            else
+                echo -e "${GREEN}✅ No recent errors in logs${NC}"
+            fi
+        else
+            echo -e "${RED}❌ Cannot determine port from service config${NC}"
+        fi
         ;;
     "help"|"-h"|"--help")
         show_help
