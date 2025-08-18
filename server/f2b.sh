@@ -953,6 +953,163 @@ function interactive_menu() {
         fi
         ;;
       5)
+        show_recent_bans
+        ;;
+      6)
+        echo -ne "${CYAN}Enter IP address to unban:${NC} "
+        read -r ip
+        if [[ $ip =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+          echo -e "${YELLOW}Unbanning $ip from all jails...${NC}"
+          if command -v fail2ban-client &>/dev/null && systemctl is-active --quiet fail2ban; then
+            local jails=$(fail2ban-client status | grep "Jail list:" | cut -d: -f2 | tr -d ' 	')
+            local unbanned=false
+            for jail in ${jails//,/ }; do
+              if fail2ban-client set "$jail" unbanip "$ip" 2>/dev/null; then
+                echo -e "${GREEN}✓ Unbanned $ip from $jail${NC}"
+                unbanned=true
+              fi
+            done
+            if [ "$unbanned" = false ]; then
+              echo -e "${YELLOW}IP $ip was not banned in any jail${NC}"
+            fi
+          else
+            echo -e "${RED}Fail2ban not running${NC}"
+          fi
+        else
+          echo -e "${RED}Invalid IP address format${NC}"
+        fi
+        ;;
+      7)
+        unban_all
+        ;;
+      8)
+        toggle_fail2ban
+        ;;
+      9)
+        echo -e "${YELLOW}Restarting Fail2ban...${NC}"
+        systemctl restart fail2ban
+        if systemctl is-active --quiet fail2ban; then
+          echo -e "${GREEN}✓ Fail2ban restarted successfully${NC}"
+        else
+          echo -e "${RED}✗ Failed to restart Fail2ban${NC}"
+        fi
+        ;;
+      10)
+        check_ssh_port_consistency
+        ;;
+      11)
+        echo -e "\n${GREEN}Fail2ban Log (last 30 lines):${NC}"
+        echo -e "${CYAN}─────────────────────────────${NC}"
+        if [ -f /var/log/fail2ban.log ]; then
+          tail -30 /var/log/fail2ban.log
+        else
+          echo -e "${RED}No fail2ban log found${NC}"
+        fi
+        ;;
+      12)
+        echo ""
+        check_version
+        version_check_result=""  # Сбрасываем уведомление после проверки
+        ;;
+      13)
+        echo -ne "${CYAN}Enter download URL (or press Enter to use current script):${NC} "
+        read -r url
+        install_script_to_system "$url"
+        ;;
+      14)
+        uninstall_script_from_system
+        ;;
+      0)
+        echo -e "\n${GREEN}Goodbye!${NC}"
+        exit 0
+        ;;
+      *)
+        echo -e "\n${RED}Invalid option. Please try again.${NC}"
+        ;;
+    esac
+    
+    if [ "$choice" != "0" ]; then
+      echo -e "$version_check_result"
+      echo ""
+    fi
+    
+    show_statistics
+    
+    echo -e "${BLUE}╔══════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${BLUE}║${WHITE}                    INTERACTIVE MENU                         ${BLUE}║${NC}"
+    echo -e "${BLUE}╚══════════════════════════════════════════════════════════════╝${NC}"
+    echo ""
+    echo -e "${CYAN} 1.${NC} Quick Install/Configure SSH Protection"
+    echo -e "${CYAN} 2.${NC} 🛠️  Service Management (SSH, Nginx, Caddy, etc.)"
+    echo -e "${CYAN} 3.${NC} 📊 Show detailed status"
+    echo -e "${CYAN} 4.${NC} 🚫 Show banned IPs (all services)"
+    echo -e "${CYAN} 5.${NC} 📋 Show recent bans (last 20)"
+    echo -e "${CYAN} 6.${NC} ⚡ Unban specific IP"
+    echo -e "${CYAN} 7.${NC} 🔄 Unban ALL IPs (all services)"
+    echo -e "${CYAN} 8.${NC} 🔧 Enable/Disable Fail2ban service"
+    echo -e "${CYAN} 9.${NC} 🔄 Restart Fail2ban"
+    echo -e "${CYAN}10.${NC} 🔍 Check SSH port consistency"
+    echo -e "${CYAN}11.${NC} 📜 View Fail2ban logs"
+    echo -e "${CYAN}12.${NC} 🆙 Check for script updates"
+    echo -e "${CYAN}13.${NC} ⚙️  Install script to system (enables f2b commands)"
+    echo -e "${CYAN}14.${NC} 🗑️  Uninstall script from system"
+    echo -e "${RED} 0.${NC} Exit"
+    echo ""
+    echo -ne "${YELLOW}Select option [0-14]:${NC} "
+    
+    read -r choice
+    echo ""
+    
+    case $choice in
+      1)
+        echo -e "\n${GREEN}Installing/Configuring SSH Protection...${NC}"
+        install_fail2ban
+        detect_ssh_port
+        backup_and_configure_fail2ban
+        restart_fail2ban
+        allow_firewall_port
+        echo -e "\n${GREEN}SSH Protection configured!${NC}"
+        echo -e "${CYAN}To enable quick commands, install script to system:${NC}"
+        echo -e "${WHITE}sudo $0 --install-system${NC}"
+        ;;
+      2)
+        manage_services_menu
+        ;;
+      3)
+        echo -e "\n${GREEN}Detailed Status:${NC}"
+        if command -v fail2ban-client &>/dev/null && systemctl is-active --quiet fail2ban; then
+          fail2ban-client status
+          echo ""
+          local jails=$(fail2ban-client status | grep "Jail list:" | cut -d: -f2 | tr -d ' 	')
+          for jail in ${jails//,/ }; do
+            echo -e "${CYAN}═══ $jail ═══${NC}"
+            fail2ban-client status "$jail"
+            echo ""
+          done
+        else
+          echo -e "${RED}Fail2ban not running${NC}"
+        fi
+        ;;
+      4)
+        echo -e "\n${GREEN}Currently Banned IPs (All Services):${NC}"
+        if command -v fail2ban-client &>/dev/null && systemctl is-active --quiet fail2ban; then
+          local jails=$(fail2ban-client status | grep "Jail list:" | cut -d: -f2 | tr -d ' 	')
+          local found_bans=false
+          for jail in ${jails//,/ }; do
+            local banned=$(fail2ban-client status "$jail" | grep 'Banned IP list:' | cut -d: -f2)
+            if [ -n "$banned" ] && [ "$banned" != " " ]; then
+              echo -e "${YELLOW}[$jail]:${NC} $banned"
+              found_bans=true
+            fi
+          done
+          if [ "$found_bans" = false ]; then
+            echo -e "${GREEN}No IPs currently banned${NC}"
+          fi
+        else
+          echo -e "${RED}Fail2ban not running${NC}"
+        fi
+        ;;
+      5)
         echo ""
         show_recent_bans
         ;;
@@ -1181,20 +1338,37 @@ function install_script_to_system() {
   if [ -n "$1" ] && [[ "$1" =~ ^https?:// ]]; then
     echo -e "${CYAN}Downloading script from: $1${NC}"
     if command -v curl &>/dev/null; then
-      curl -s "$1" > "$script_path"
+      if curl -s "$1" > "$script_path"; then
+        echo -e "${GREEN}✓ Downloaded successfully${NC}"
+      else
+        echo -e "${RED}✗ Download failed${NC}"
+        return 1
+      fi
     elif command -v wget &>/dev/null; then
-      wget -q -O "$script_path" "$1"
+      if wget -q -O "$script_path" "$1"; then
+        echo -e "${GREEN}✓ Downloaded successfully${NC}"
+      else
+        echo -e "${RED}✗ Download failed${NC}"
+        return 1
+      fi
     else
       echo -e "${RED}Neither curl nor wget available for download${NC}"
       return 1
     fi
   else
-    # Копируем текущий скрипт
-    cp "$0" "$script_path"
+    # Копируем текущий скрипт (только если это реальный файл)
+    if [ -f "$0" ] && [ -s "$0" ]; then
+      cp "$0" "$script_path"
+      echo -e "${GREEN}✓ Copied from local file${NC}"
+    else
+      echo -e "${RED}✗ Cannot copy current script (not a valid file)${NC}"
+      echo -e "${YELLOW}Try downloading from URL instead${NC}"
+      return 1
+    fi
   fi
   
   # Проверяем успешность и делаем исполняемым
-  if [ -f "$script_path" ]; then
+  if [ -f "$script_path" ] && [ -s "$script_path" ]; then
     chmod +x "$script_path"
     echo -e "${GREEN}✓ Script installed to $script_path${NC}"
     echo -e "${CYAN}You can now run:${NC}"
@@ -1210,7 +1384,7 @@ function install_script_to_system() {
     
     return 0
   else
-    echo -e "${RED}✗ Failed to install script${NC}"
+    echo -e "${RED}✗ Failed to install script (file is empty or missing)${NC}"
     return 1
   fi
 }
@@ -1335,7 +1509,8 @@ case "$1" in
         echo -e "${GREEN}📦 Устанавливаем Fail2ban Manager v$SCRIPT_VERSION${NC}"
       fi
       
-      install_script_to_system
+      # При установке через wget/curl всегда скачиваем с GitHub
+      install_script_to_system "$VERSION_CHECK_URL"
       exit $?
     else
       # Интерактивный режим (запуск локального файла)
