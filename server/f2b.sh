@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Версия скрипта
-SCRIPT_VERSION="2.1.0"
+SCRIPT_VERSION="2.2.1"
 VERSION_CHECK_URL="https://raw.githubusercontent.com/DigneZzZ/dignezzz.github.io/main/server/f2b.sh"
 
 # Цвета
@@ -259,33 +259,49 @@ function show_statistics() {
     
     if [ -n "$jails" ]; then
       # SSH Services
-      echo -e "${PURPLE}📡 SSH Services:${NC}"
+      local ssh_services_found=false
       for jail in ${jails//,/ }; do
         if [[ "$jail" =~ ^(sshd|ssh)$ ]]; then
+          if [ "$ssh_services_found" = false ]; then
+            echo -e "${PURPLE}📡 SSH Services:${NC}"
+            ssh_services_found=true
+          fi
           show_jail_stats "$jail" "  "
         fi
       done
       
       # Web Services  
-      echo -e "${PURPLE}🌐 Web Services:${NC}"
+      local web_services_found=false
       for jail in ${jails//,/ }; do
         if [[ "$jail" =~ ^(nginx|caddy|phpmyadmin).*$ ]]; then
+          if [ "$web_services_found" = false ]; then
+            echo -e "${PURPLE}🌐 Web Services:${NC}"
+            web_services_found=true
+          fi
           show_jail_stats "$jail" "  "
         fi
       done
       
       # Database Services
-      echo -e "${PURPLE}🗄️ Database Services:${NC}"
+      local db_services_found=false
       for jail in ${jails//,/ }; do
         if [[ "$jail" =~ ^(mysql|mariadb).*$ ]]; then
+          if [ "$db_services_found" = false ]; then
+            echo -e "${PURPLE}🗄️ Database Services:${NC}"
+            db_services_found=true
+          fi
           show_jail_stats "$jail" "  "
         fi
       done
       
       # Other Services
-      echo -e "${PURPLE}🔧 Other Services:${NC}"
+      local other_services_found=false
       for jail in ${jails//,/ }; do
         if ! [[ "$jail" =~ ^(sshd|ssh|nginx|apache|caddy|httpd|wordpress|phpmyadmin|roundcube|postfix|dovecot|exim|sendmail|mysql|mariadb|postgresql|mongo|vsftpd|proftpd|pureftpd|ftp).*$ ]]; then
+          if [ "$other_services_found" = false ]; then
+            echo -e "${PURPLE}🔧 Other Services:${NC}"
+            other_services_found=true
+          fi
           show_jail_stats "$jail" "  "
         fi
       done
