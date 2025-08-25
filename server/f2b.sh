@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Версия скрипта
-SCRIPT_VERSION="2.2.1"
+SCRIPT_VERSION="2.3.0"
 VERSION_CHECK_URL="https://raw.githubusercontent.com/DigneZzZ/dignezzz.github.io/main/server/f2b.sh"
 
 # Цвета
@@ -661,7 +661,8 @@ EOF
     "sshd")
       local ssh_port=$(grep -Po '(?<=^Port )\d+' /etc/ssh/sshd_config | head -n1)
       ssh_port=${ssh_port:-22}
-      add_jail_config "$service" "enabled = true" "port = $ssh_port" "filter = sshd" "logpath = /var/log/auth.log" "maxretry = 3" "bantime = 600"
+      local ssh_log_path=$(get_ssh_log_path)
+      add_jail_config "$service" "enabled = true" "port = $ssh_port" "filter = sshd" "logpath = $ssh_log_path" "maxretry = 3" "bantime = 600"
       ;;
     "nginx")
       # Nginx HTTP Auth failures
@@ -1208,10 +1209,112 @@ function interactive_menu() {
   done
 }
 
+function detect_os() {
+  if [ -f /etc/os-release ]; then
+    . /etc/os-release
+    OS=$NAME
+    OS_ID=$ID
+    VERSION=$VERSION_ID
+  elif type lsb_release >/dev/null 2>&1; then
+    OS=$(lsb_release -si)
+    VERSION=$(lsb_release -sr)
+  elif [ -f /etc/lsb-release ]; then
+    . /etc/lsb-release
+    OS=$DISTRIB_ID
+    VERSION=$DISTRIB_RELEASE
+  elif [ -f /etc/debian_version ]; then
+    OS=Debian
+    VERSION=$(cat /etc/debian_version)
+  elif [ -f /etc/redhat-release ]; then
+    OS=$(cat /etc/redhat-release | awk '{print $1}')
+    VERSION=$(cat /etc/redhat-release | grep -o '[0-9]\+\.[0-9]\+' | head -1)
+  else
+    OS=$(uname -s)
+    VERSION=$(uname -r)
+  fi
+}
+
+function get_ssh_log_path() {
+  # Определяем путь к SSH логам в зависимости от ОС
+  detect_os
+  
+  case "$OS_ID" in
+    ubuntu|debian)
+      echo "/var/log/auth.log"
+      ;;
+    almalinux|rocky|rhel|centos|fedora)
+      echo "/var/log/secure"
+      ;;
+    opensuse*|sles)
+      echo "/var/log/messages"
+      ;;
+    arch)
+      echo "/var/log/auth.log"
+      ;;
+    *)
+      # Пробуем найти существующий лог файл
+      if [ -f "/var/log/auth.log" ]; then
+        echo "/var/log/auth.log"
+      elif [ -f "/var/log/secure" ]; then
+        echo "/var/log/secure"
+      elif [ -f "/var/log/messages" ]; then
+        echo "/var/log/messages"
+      else
+        echo "/var/log/auth.log"  # По умолчанию
+      fi
+      ;;
+  esac
+}
+
 function install_fail2ban() {
   if ! command -v fail2ban-server &>/dev/null; then
     echo -e "${YELLOW}Installing Fail2ban...${NC}"
-    apt update && apt install -y fail2ban || { echo -e "${RED}Failed to install fail2ban${NC}"; exit 1; }
+    
+    # Определяем операционную систему
+    detect_os
+    
+    case "$OS_ID" in
+      ubuntu|debian)
+        echo -e "${CYAN}Detected: $OS${NC}"
+        apt update && apt install -y fail2ban || { echo -e "${RED}Failed to install fail2ban${NC}"; exit 1; }
+        ;;
+      almalinux|rocky|rhel|centos|fedora)
+        echo -e "${CYAN}Detected: $OS${NC}"
+        if command -v dnf &>/dev/null; then
+          # AlmaLinux 8+, Rocky Linux, RHEL 8+, Fedora
+          dnf install -y epel-release && dnf install -y fail2ban || { echo -e "${RED}Failed to install fail2ban${NC}"; exit 1; }
+        elif command -v yum &>/dev/null; then
+          # CentOS 7, RHEL 7
+          yum install -y epel-release && yum install -y fail2ban || { echo -e "${RED}Failed to install fail2ban${NC}"; exit 1; }
+        else
+          echo -e "${RED}No package manager found (dnf/yum)${NC}"
+          exit 1
+        fi
+        ;;
+      opensuse*|sles)
+        echo -e "${CYAN}Detected: $OS${NC}"
+        zypper install -y fail2ban || { echo -e "${RED}Failed to install fail2ban${NC}"; exit 1; }
+        ;;
+      arch)
+        echo -e "${CYAN}Detected: $OS${NC}"
+        pacman -S --noconfirm fail2ban || { echo -e "${RED}Failed to install fail2ban${NC}"; exit 1; }
+        ;;
+      *)
+        echo -e "${YELLOW}Unknown OS: $OS${NC}"
+        echo -e "${YELLOW}Trying apt (Debian/Ubuntu)...${NC}"
+        apt update && apt install -y fail2ban || {
+          echo -e "${YELLOW}Trying dnf (RHEL/AlmaLinux/Rocky)...${NC}"
+          dnf install -y epel-release && dnf install -y fail2ban || {
+            echo -e "${YELLOW}Trying yum (CentOS)...${NC}"
+            yum install -y epel-release && yum install -y fail2ban || {
+              echo -e "${RED}Failed to install fail2ban on this system${NC}"
+              echo -e "${CYAN}Please install fail2ban manually and run this script again${NC}"
+              exit 1
+            }
+          }
+        }
+        ;;
+    esac
   else
     echo -e "${GREEN}Fail2ban is already installed${NC}"
   fi
@@ -1285,6 +1388,9 @@ function backup_and_configure_fail2ban() {
   JAIL_LOCAL="/etc/fail2ban/jail.local"
   cp -f "$JAIL_LOCAL" "${JAIL_LOCAL}.bak_$(date +%Y%m%d_%H%M%S)" 2>/dev/null
 
+  # Получаем правильный путь к SSH логам
+  local ssh_log_path=$(get_ssh_log_path)
+
   cat > "$JAIL_LOCAL" <<EOF
 [DEFAULT]
 ignoreip = 127.0.0.1/8
@@ -1300,7 +1406,7 @@ backend = systemd
 enabled = true
 port = $SSH_PORT
 filter = sshd
-logpath = /var/log/auth.log
+logpath = $ssh_log_path
 EOF
 
   echo -e "${GREEN}Fail2ban configured with dynamic SSH blocking.${NC}"
@@ -1319,9 +1425,26 @@ function restart_fail2ban() {
 }
 
 function allow_firewall_port() {
+  # Определяем ОС для выбора подходящего файервола
+  detect_os
+  
   if command -v ufw > /dev/null; then
+    # Ubuntu/Debian с UFW
     ufw allow "$SSH_PORT"/tcp || true
     echo -e "${YELLOW}UFW: allowed SSH port $SSH_PORT${NC}"
+  elif command -v firewall-cmd > /dev/null; then
+    # RHEL/CentOS/AlmaLinux/Rocky с firewalld
+    firewall-cmd --permanent --add-port="$SSH_PORT"/tcp || true
+    firewall-cmd --reload || true
+    echo -e "${YELLOW}Firewalld: allowed SSH port $SSH_PORT${NC}"
+  elif command -v iptables > /dev/null; then
+    # Fallback к iptables
+    iptables -A INPUT -p tcp --dport "$SSH_PORT" -j ACCEPT || true
+    echo -e "${YELLOW}iptables: allowed SSH port $SSH_PORT${NC}"
+    echo -e "${CYAN}Note: iptables rules may not persist after reboot${NC}"
+  else
+    echo -e "${YELLOW}No supported firewall found (ufw/firewalld/iptables)${NC}"
+    echo -e "${CYAN}Please manually allow SSH port $SSH_PORT in your firewall${NC}"
   fi
 }
 
@@ -1481,6 +1604,13 @@ case "$1" in
     ;;
   --help|-h)
     echo "Fail2Ban SSH Security Manager v$SCRIPT_VERSION"
+    echo ""
+    echo "Supported Operating Systems:"
+    echo "  • Ubuntu/Debian (apt)"
+    echo "  • AlmaLinux/Rocky Linux/RHEL/CentOS (dnf/yum)"
+    echo "  • Fedora (dnf)"
+    echo "  • openSUSE/SLES (zypper)"
+    echo "  • Arch Linux (pacman)"
     echo ""
     echo "Usage: $0 [OPTIONS]"
     echo ""
