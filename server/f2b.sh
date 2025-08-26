@@ -212,6 +212,21 @@ function check_version() {
       echo -e "${YELLOW}Current version: $SCRIPT_VERSION${NC}"
       echo -e "${CYAN}Download: $VERSION_CHECK_URL${NC}"
       echo ""
+      
+      # Предлагаем автоматическое обновление если скрипт установлен в системе
+      if [ -f "$INSTALL_PATH" ] && [ "$EUID" -eq 0 ]; then
+        echo -e "${CYAN}Do you want to update automatically? (y/N):${NC}"
+        read -r response
+        if [[ "$response" =~ ^[Yy]$ ]]; then
+          update_script
+          return $?
+        fi
+      elif [ "$EUID" -ne 0 ]; then
+        echo -e "${YELLOW}Note: Run as root to enable automatic update option${NC}"
+      else
+        echo -e "${YELLOW}Note: Script not installed in system. Use option 13 to install first.${NC}"
+      fi
+      
       return 1
     else
       echo -e "${GREEN}You have the latest version${NC}"
@@ -222,6 +237,51 @@ function check_version() {
     echo ""
   fi
   return 0
+}
+
+function update_script() {
+  echo -e "${YELLOW}Updating script...${NC}"
+  
+  if [ "$EUID" -ne 0 ]; then
+    echo -e "${RED}Root privileges required for update${NC}"
+    return 1
+  fi
+  
+  # Создаем резервную копию
+  if [ -f "$INSTALL_PATH" ]; then
+    cp "$INSTALL_PATH" "${INSTALL_PATH}.bak_$(date +%Y%m%d_%H%M%S)"
+    echo -e "${CYAN}Backup created: ${INSTALL_PATH}.bak_$(date +%Y%m%d_%H%M%S)${NC}"
+  fi
+  
+  # Скачиваем новую версию
+  if command -v curl &>/dev/null; then
+    if curl -s "$VERSION_CHECK_URL" > "$INSTALL_PATH"; then
+      chmod +x "$INSTALL_PATH"
+      echo -e "${GREEN}✓ Script updated successfully!${NC}"
+      echo -e "${CYAN}New version installed to $INSTALL_PATH${NC}"
+      echo ""
+      echo -e "${YELLOW}Restart the script to use the new version${NC}"
+      return 0
+    else
+      echo -e "${RED}✗ Failed to download update${NC}"
+      return 1
+    fi
+  elif command -v wget &>/dev/null; then
+    if wget -q -O "$INSTALL_PATH" "$VERSION_CHECK_URL"; then
+      chmod +x "$INSTALL_PATH"
+      echo -e "${GREEN}✓ Script updated successfully!${NC}"
+      echo -e "${CYAN}New version installed to $INSTALL_PATH${NC}"
+      echo ""
+      echo -e "${YELLOW}Restart the script to use the new version${NC}"
+      return 0
+    else
+      echo -e "${RED}✗ Failed to download update${NC}"
+      return 1
+    fi
+  else
+    echo -e "${RED}Neither curl nor wget available for download${NC}"
+    return 1
+  fi
 }
 
 function check_root() {
