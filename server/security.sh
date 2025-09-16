@@ -90,13 +90,23 @@ fi
 cp "$SSHD_CONFIG" "$SSHD_CONFIG_BACKUP"
 echo -e "$MSG_BACKUP_CREATED ${BLUE}$SSHD_CONFIG_BACKUP${NC}"
 
-# Показываем версию OpenSSH для информации
-if command -v ssh >/dev/null 2>&1; then
-  echo -e "$MSG_SSH_VERSION ${BLUE}$SSH_VERSION${NC}"
+# Определяем ОС для информации
+if [ -f /etc/os-release ]; then
+  OS_NAME=$(grep '^NAME=' /etc/os-release | cut -d'"' -f2)
+  if [ "$lang_choice" = "2" ]; then
+    echo -e "${CYAN}Операционная система: ${BLUE}$OS_NAME${NC}"
+  else
+    echo -e "${CYAN}Operating System: ${BLUE}$OS_NAME${NC}"
+  fi
 fi
 
 # Получаем версию OpenSSH
 SSH_VERSION=$(ssh -V 2>&1 | grep -oE '[0-9]+\.[0-9]+' | head -1)
+
+# Показываем версию OpenSSH для информации
+if command -v ssh >/dev/null 2>&1; then
+  echo -e "$MSG_SSH_VERSION ${BLUE}$SSH_VERSION${NC}"
+fi
 SSH_MAJOR=$(echo "$SSH_VERSION" | cut -d. -f1)
 SSH_MINOR=$(echo "$SSH_VERSION" | cut -d. -f2)
 
