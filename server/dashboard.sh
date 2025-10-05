@@ -5,7 +5,7 @@
 # ============================================================================
 # Description: Modern, configurable MOTD dashboard for Linux servers
 # Author: DigneZzZ - https://gig.ovh
-# Version: 2025.10.05
+# Version: 2025.10.05.1
 # License: MIT
 # ============================================================================
 
@@ -14,7 +14,7 @@ set -euo pipefail  # Exit on error, undefined variable, pipe failure
 # ============================================================================
 # CONSTANTS
 # ============================================================================
-readonly SCRIPT_VERSION="2025.10.05"
+readonly SCRIPT_VERSION="2025.10.05.1"
 readonly SCRIPT_NAME="GIG MOTD Dashboard"
 readonly REMOTE_URL="https://dignezzz.github.io/server/dashboard.sh"
 
@@ -99,12 +99,26 @@ $(_bold "OPTIONS:")
 $(_bold "EXAMPLES:")
     sudo bash dashboard.sh
     bash dashboard.sh --not-root
-    bash <(wget -qO- $REMOTE_URL)
+    bash <(wget -qO- $REMOTE_URL) --force
 
 $(_bold "POST-INSTALLATION:")
-    motd            - View MOTD dashboard anytime
-    motd-config     - Configure dashboard settings
-    motd --update   - Update to latest version
+    motd                  - View MOTD dashboard anytime
+    motd --update         - Update to latest version
+    motd --check-update   - Force check for updates
+    motd-config           - Configure dashboard settings
+
+$(_bold "FEATURES:")
+    ✅ Progress bars for CPU, RAM, SWAP, Disk with color indicators
+    ✅ Top processes by CPU and RAM usage
+    ✅ Fail2ban statistics (banned IPs count)
+    ✅ CPU temperature monitoring (if available)
+    ✅ Auto-update checking (on every login)
+    ✅ Configurable blocks via motd-config
+
+$(_bold "VERSION FORMAT:")
+    YYYY.MM.DD.MINOR - Example: 2025.10.05.1
+    - YYYY.MM.DD: Release date
+    - MINOR: Incremental updates within the same day (1, 2, 3...)
 
 EOF
 }
@@ -148,6 +162,22 @@ install_motd_viewer() {
 # GIG MOTD Viewer - быстрый просмотр дашборда
 DASHBOARD_FILE_GLOBAL="/etc/update-motd.d/99-dashboard"
 DASHBOARD_FILE_USER="$HOME/.config/gig-motd/99-dashboard"
+REMOTE_URL="https://dignezzz.github.io/server/dashboard.sh"
+
+# Проверка аргументов
+if [ "$1" = "--update" ] || [ "$1" = "-u" ]; then
+    echo "🔄 Обновление GIG MOTD Dashboard..."
+    if [ "$EUID" -eq 0 ]; then
+        bash <(wget -qO- "$REMOTE_URL") --force
+    else
+        bash <(wget -qO- "$REMOTE_URL") --force --not-root
+    fi
+    exit $?
+fi
+
+if [ "$1" = "--check-update" ] || [ "$1" = "-c" ]; then
+    echo "🔍 Проверка обновлений..."
+fi
 
 if [ -f "$DASHBOARD_FILE_GLOBAL" ]; then
     bash "$DASHBOARD_FILE_GLOBAL"
@@ -155,7 +185,7 @@ elif [ -f "$DASHBOARD_FILE_USER" ]; then
     bash "$DASHBOARD_FILE_USER"
 else
     echo "❌ MOTD Dashboard не установлен"
-    echo "💡 Установка: bash <(wget -qO- https://dignezzz.github.io/server/dashboard.sh)"
+    echo "💡 Установка: bash <(wget -qO- $REMOTE_URL)"
     exit 1
 fi
 EOF
@@ -317,9 +347,11 @@ cat > "$TMP_FILE" << 'EOF'
 #!/bin/bash
 
 
-CURRENT_VERSION="2025.05.09"
+CURRENT_VERSION="2025.10.05.1"
 REMOTE_URL="https://dignezzz.github.io/server/dashboard.sh"
-REMOTE_VERSION=$(curl -s "$REMOTE_URL" | grep '^CURRENT_VERSION=' | cut -d= -f2 | tr -d '"')
+
+# Проверка обновлений (каждый раз при входе)
+REMOTE_VERSION=$(timeout 3 curl -s "$REMOTE_URL" 2>/dev/null | grep '^CURRENT_VERSION=' | head -n1 | cut -d= -f2 | tr -d '"')
 
 if [ -n "$REMOTE_VERSION" ] && [ "$REMOTE_VERSION" != "$CURRENT_VERSION" ]; then
     echo "${warn} Доступна новая версия MOTD-дашборда: $REMOTE_VERSION (текущая: $CURRENT_VERSION)"
