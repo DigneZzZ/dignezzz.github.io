@@ -469,6 +469,19 @@ CONFIG_USER="$HOME/.motdrc"
 # Порог для предупреждения о сертификатах (дни)
 : "${SSL_WARN_DAYS:=30}"
 
+# === Рандомный выбор стиля прогресс-бара ===
+BAR_STYLES=(
+    "= -"    # Стиль 1: [=============-------------]
+    "# ."    # Стиль 2: [#############.............]
+    "* ."    # Стиль 3: [*************..............]
+    "> ."    # Стиль 4: [>>>>>>>>>>>>>.............]
+    "o ."    # Стиль 5: [ooooooooooooo.............]
+    "+ -"    # Стиль 6: [+++++++++++++-------------]
+)
+RANDOM_STYLE=${BAR_STYLES[$((RANDOM % ${#BAR_STYLES[@]}))]}
+BAR_FILLED_CHAR=$(echo "$RANDOM_STYLE" | cut -d' ' -f1)
+BAR_EMPTY_CHAR=$(echo "$RANDOM_STYLE" | cut -d' ' -f2)
+
 # === Функция: Прогресс-бар ===
 draw_bar() {
     local percent=$1
@@ -486,8 +499,8 @@ draw_bar() {
     fi
     
     printf "${color}["
-    printf "%${filled}s" | tr ' ' '█'
-    printf "%${empty}s" | tr ' ' '░'
+    printf "%${filled}s" | tr ' ' "$BAR_FILLED_CHAR"
+    printf "%${empty}s" | tr ' ' "$BAR_EMPTY_CHAR"
     printf "]\033[0m %3d%%" "$percent"
 }
 
