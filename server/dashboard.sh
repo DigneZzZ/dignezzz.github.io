@@ -5,7 +5,7 @@
 # ============================================================================
 # Description: Modern, configurable MOTD dashboard for Linux servers
 # Author: DigneZzZ - https://gig.ovh
-# Version: 2025.10.05.2
+# Version: 2025.10.05.3
 # License: MIT
 # ============================================================================
 
@@ -14,7 +14,7 @@ set -euo pipefail  # Exit on error, undefined variable, pipe failure
 # ============================================================================
 # CONSTANTS
 # ============================================================================
-readonly SCRIPT_VERSION="2025.10.05.2"
+readonly SCRIPT_VERSION="2025.10.05.3"
 readonly SCRIPT_NAME="GIG MOTD Dashboard"
 readonly REMOTE_URL="https://dignezzz.github.io/server/dashboard.sh"
 
@@ -408,7 +408,7 @@ cat > "$TMP_FILE" << 'EOF'
 #!/bin/bash
 
 
-CURRENT_VERSION="2025.10.05.2"
+CURRENT_VERSION="2025.10.05.3"
 REMOTE_URL="https://dignezzz.github.io/server/dashboard.sh"
 
 # Проверка обновлений (каждый раз при входе)
@@ -470,17 +470,15 @@ CONFIG_USER="$HOME/.motdrc"
 : "${SSL_WARN_DAYS:=30}"
 
 # === Рандомный выбор стиля прогресс-бара ===
-BAR_STYLES=(
-    "= -"    # Стиль 1: [=============-------------]
-    "# ."    # Стиль 2: [#############.............]
-    "* ."    # Стиль 3: [*************..............]
-    "> ."    # Стиль 4: [>>>>>>>>>>>>>.............]
-    "o ."    # Стиль 5: [ooooooooooooo.............]
-    "+ -"    # Стиль 6: [+++++++++++++-------------]
-)
-RANDOM_STYLE=${BAR_STYLES[$((RANDOM % ${#BAR_STYLES[@]}))]}
-BAR_FILLED_CHAR=$(echo "$RANDOM_STYLE" | cut -d' ' -f1)
-BAR_EMPTY_CHAR=$(echo "$RANDOM_STYLE" | cut -d' ' -f2)
+BAR_STYLE=$((RANDOM % 6))
+case $BAR_STYLE in
+    0) BAR_FILLED_CHAR="=" BAR_EMPTY_CHAR="-" ;;  # [=============-------------]
+    1) BAR_FILLED_CHAR="#" BAR_EMPTY_CHAR="." ;;  # [#############.............]
+    2) BAR_FILLED_CHAR="*" BAR_EMPTY_CHAR="." ;;  # [*************..............]
+    3) BAR_FILLED_CHAR=">" BAR_EMPTY_CHAR="." ;;  # [>>>>>>>>>>>>>.............]
+    4) BAR_FILLED_CHAR="o" BAR_EMPTY_CHAR="." ;;  # [ooooooooooooo.............]
+    5) BAR_FILLED_CHAR="+" BAR_EMPTY_CHAR="-" ;;  # [+++++++++++++-------------]
+esac
 
 # === Функция: Прогресс-бар ===
 draw_bar() {
@@ -673,15 +671,27 @@ fi
 # Open Files
 open_files=$(lsof 2>/dev/null | wc -l || echo "0")
 max_files=$(ulimit -n)
-open_files_percent=$((open_files * 100 / max_files))
+# Исправление: правильный расчёт процента
+if [ "$max_files" -gt 0 ]; then
+    open_files_percent=$((open_files * 100 / max_files))
+    # Ограничение максимум 100%
+    [ "$open_files_percent" -gt 100 ] && open_files_percent=100
+else
+    open_files_percent=0
+fi
 
 # Docker volumes
 docker_volumes_usage=""
 if command -v docker &>/dev/null; then
     docker_volumes_count=$(docker volume ls -q 2>/dev/null | wc -l)
     if [ "$docker_volumes_count" -gt 0 ]; then
-        docker_volumes_size=$(docker system df -v 2>/dev/null | grep "^Local Volumes" | awk '{print $4}')
-        docker_volumes_usage="$docker_volumes_count volumes ($docker_volumes_size)"
+        # Исправление: правильное извлечение размера
+        docker_volumes_size=$(docker system df -v 2>/dev/null | grep "Local Volumes" | awk '{print $4}')
+        # Если размер не определён, используем альтернативный метод
+        if [ -z "$docker_volumes_size" ] || [ "$docker_volumes_size" = "0B" ]; then
+            docker_volumes_size=$(docker system df 2>/dev/null | grep "Local Volumes" | awk '{print $3}')
+        fi
+        [ -n "$docker_volumes_size" ] && docker_volumes_usage="$docker_volumes_count volumes ($docker_volumes_size)" || docker_volumes_usage="$docker_volumes_count volumes"
     fi
 fi
 
