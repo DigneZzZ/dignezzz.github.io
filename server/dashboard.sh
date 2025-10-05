@@ -1,28 +1,139 @@
 #!/bin/bash
 
-# === Настройки ===
+# ============================================================================
+# GIG MOTD Dashboard - Installation & Management Script
+# ============================================================================
+# Description: Modern, configurable MOTD dashboard for Linux servers
+# Author: DigneZzZ - https://gig.ovh
+# Version: 2025.10.05
+# License: MIT
+# ============================================================================
+
+set -euo pipefail  # Exit on error, undefined variable, pipe failure
+
+# ============================================================================
+# CONSTANTS
+# ============================================================================
+readonly SCRIPT_VERSION="2025.10.05"
+readonly SCRIPT_NAME="GIG MOTD Dashboard"
+readonly REMOTE_URL="https://dignezzz.github.io/server/dashboard.sh"
+
+# Default paths (can be overridden by --not-root)
 DASHBOARD_FILE="/etc/update-motd.d/99-dashboard"
 CONFIG_GLOBAL="/etc/motdrc"
 MOTD_CONFIG_TOOL="/usr/local/bin/motd-config"
+MOTD_VIEWER="/usr/local/bin/motd"
 
+# ============================================================================
+# GLOBAL VARIABLES
+# ============================================================================
 FORCE_MODE=false
 INSTALL_USER_MODE=false
+QUIET_MODE=false
 
-# === Обработка аргументов ===
-for arg in "$@"; do
-    case $arg in
-        --force)
-            FORCE_MODE=true
-            ;;
-        --not-root)
-            INSTALL_USER_MODE=true
-            ;;
-    esac
-done
+# ============================================================================
+# COLOR FUNCTIONS
+# ============================================================================
+_color() { 
+    [ "$QUIET_MODE" = true ] && return
+    printf "\033[%sm%s\033[0m" "$1" "$2"
+}
+
+_red() { _color "0;31" "$1"; }
+_green() { _color "0;32" "$1"; }
+_yellow() { _color "0;33" "$1"; }
+_blue() { _color "0;36" "$1"; }
+_bold() { _color "1" "$1"; }
+
+# ============================================================================
+# UTILITY FUNCTIONS
+# ============================================================================
+
+_exists() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+print_header() {
+    echo ""
+    _bold "=========================================="
+    _bold "$1"
+    _bold "=========================================="
+    echo ""
+}
+
+info() {
+    [ "$QUIET_MODE" = false ] && echo "$(_blue "ℹ️")  $*"
+}
+
+success() {
+    [ "$QUIET_MODE" = false ] && echo "$(_green "✅") $*"
+}
+
+warning() {
+    [ "$QUIET_MODE" = false ] && echo "$(_yellow "⚠️")  $*"
+}
+
+error_exit() {
+    echo "$(_red "❌") $*" >&2
+    exit 1
+}
+
+# ============================================================================
+# HELP AND VERSION
+# ============================================================================
+
+show_help() {
+    cat << EOF
+$(_bold "$SCRIPT_NAME v$SCRIPT_VERSION")
+
+$(_bold "USAGE:")
+    $0 [OPTIONS]
+
+$(_bold "OPTIONS:")
+    --force         Skip confirmation prompts
+    --not-root      Install in user's home directory
+    --quiet         Minimal output
+    --help          Show this help message
+    --version       Show version information
+
+$(_bold "EXAMPLES:")
+    sudo bash dashboard.sh
+    bash dashboard.sh --not-root
+    bash <(wget -qO- $REMOTE_URL)
+
+$(_bold "POST-INSTALLATION:")
+    motd            - View MOTD dashboard anytime
+    motd-config     - Configure dashboard settings
+    motd --update   - Update to latest version
+
+EOF
+}
+
+show_version() {
+    echo "$SCRIPT_NAME v$SCRIPT_VERSION"
+    echo "Author: DigneZzZ - https://gig.ovh"
+}
+
+# ============================================================================
+# ARGUMENT PARSING
+# ============================================================================
+
+parse_arguments() {
+    for arg in "$@"; do
+        case $arg in
+            --force) FORCE_MODE=true ;;
+            --not-root) INSTALL_USER_MODE=true ;;
+            --quiet) QUIET_MODE=true ;;
+            --help|-h) show_help; exit 0 ;;
+            --version|-v) show_version; exit 0 ;;
+            *) warning "Unknown option: $arg (use --help for usage)" ;;
+        esac
+    done
+}
 
 
 if [ "$INSTALL_USER_MODE" = true ]; then
-    DASHBOARD_FILE="$HOME/.config/neonode/99-dashboard"
+    DASHBOARD_FILE="$HOME/.config/gig-motd/99-dashboard"
     MOTD_CONFIG_TOOL="$HOME/.local/bin/motd-config"
     CONFIG_GLOBAL="$HOME/.motdrc"
     mkdir -p "$(dirname "$DASHBOARD_FILE")" "$(dirname "$MOTD_CONFIG_TOOL")"
@@ -42,7 +153,7 @@ TARGET_FILE="$CONFIG_GLOBAL"
 [ ! -w "$CONFIG_GLOBAL" ] && TARGET_FILE="$CONFIG_USER"
 
 DASHBOARD_FILE_GLOBAL="/etc/update-motd.d/99-dashboard"
-DASHBOARD_FILE_USER="$HOME/.config/neonode/99-dashboard"
+DASHBOARD_FILE_USER="$HOME/.config/gig-motd/99-dashboard"
 TOOL_PATH_GLOBAL="/usr/local/bin/motd-config"
 TOOL_PATH_USER="$HOME/.local/bin/motd-config"
 
@@ -62,7 +173,7 @@ OPTIONS=(
 )
 
 print_menu() {
-  echo "🔧 Настройка NeoNode MOTD"
+  echo "🔧 Настройка GIG MOTD"
   echo "1) Настроить отображаемые блоки"
   echo "2) Удалить MOTD-дашборд"
   echo "0) Выход"
@@ -361,7 +472,7 @@ print_section() {
 }
 
 echo "$separator"
-echo " MOTD Dashboard — powered by https://NeoNode.cc"
+echo " MOTD Dashboard — powered by https://gig.ovh"
 echo "$separator"
 [ "$SHOW_UPTIME" = true ] && print_section uptime
 [ "$SHOW_LOAD" = true ] && print_section load
@@ -383,7 +494,7 @@ printf " %-20s : %s\n" "Config tool" "motd-config"
 EOF
 clear
 echo "===================================================="
-echo "📋 Предпросмотр NeoNode MOTD (реальный вывод):"
+echo "📋 Предпросмотр GIG MOTD (реальный вывод):"
 echo "===================================================="
 bash "$TMP_FILE"
 echo "===================================================="
