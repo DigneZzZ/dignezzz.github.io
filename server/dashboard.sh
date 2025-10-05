@@ -5,7 +5,7 @@
 # ============================================================================
 # Description: Modern, configurable MOTD dashboard for Linux servers
 # Author: DigneZzZ - https://gig.ovh
-# Version: 2025.10.05.4
+# Version: 2025.10.05.5
 # License: MIT
 # ============================================================================
 
@@ -14,7 +14,7 @@ set -euo pipefail  # Exit on error, undefined variable, pipe failure
 # ============================================================================
 # CONSTANTS
 # ============================================================================
-readonly SCRIPT_VERSION="2025.10.05.4"
+readonly SCRIPT_VERSION="2025.10.05.5"
 readonly SCRIPT_NAME="GIG MOTD Dashboard"
 readonly REMOTE_URL="https://dignezzz.github.io/server/dashboard.sh"
 
@@ -408,7 +408,7 @@ cat > "$TMP_FILE" << 'EOF'
 #!/bin/bash
 
 
-CURRENT_VERSION="2025.10.05.4"
+CURRENT_VERSION="2025.10.05.5"
 REMOTE_URL="https://dignezzz.github.io/server/dashboard.sh"
 
 # Проверка обновлений (каждый раз при входе)
@@ -670,13 +670,12 @@ fi
 
 # Open Files
 open_files=$(lsof 2>/dev/null | wc -l || echo "0")
-# Получаем реальный системный лимит (не ulimit пользователя)
-max_files_system=$(cat /proc/sys/fs/file-max 2>/dev/null || echo "1048576")
-# Используем правильный лимит для отображения
+# Получаем лимит для конкретного процесса (более реалистичный)
 max_files=$(ulimit -n 2>/dev/null || echo "1024")
-# Если ulimit слишком маленький, используем системный
-if [ "$max_files" -lt 10000 ]; then
-    max_files=$max_files_system
+# Если ulimit показывает unlimited или слишком большое значение
+if [ "$max_files" = "unlimited" ] || [ "$max_files" -gt 1000000 ]; then
+    # Используем разумное значение по умолчанию
+    max_files=65536
 fi
 # Правильный расчёт процента
 if [ "$max_files" -gt 0 ]; then
@@ -692,33 +691,31 @@ docker_volumes_usage=""
 if command -v docker &>/dev/null; then
     docker_volumes_count=$(docker volume ls -q 2>/dev/null | wc -l)
     if [ "$docker_volumes_count" -gt 0 ]; then
-        # Получаем размер через docker system df
-        docker_volumes_info=$(docker system df 2>/dev/null | grep "Local Volumes")
-        if [ -n "$docker_volumes_info" ]; then
-            # Извлекаем размер (3-я колонка)
-            docker_volumes_size=$(echo "$docker_volumes_info" | awk '{print $3}')
-            # Если размер пустой или 0B, пробуем альтернативный способ
-            if [ -z "$docker_volumes_size" ] || [ "$docker_volumes_size" = "0B" ]; then
-                # Считаем размер всех volumes вручную
-                total_size=0
-                for vol in $(docker volume ls -q); do
-                    vol_size=$(docker volume inspect "$vol" 2>/dev/null | grep -o '"Size": *[0-9]*' | awk '{sum+=$2} END {print sum}')
-                    total_size=$((total_size + vol_size))
-                done
-                if [ "$total_size" -gt 0 ]; then
+        # Метод 1: через docker system df
+        docker_volumes_size=$(docker system df 2>/dev/null | grep "Local Volumes" | awk '{print $3}')
+        
+        # Метод 2: если не получилось, считаем через du
+        if [ -z "$docker_volumes_size" ] || [ "$docker_volumes_size" = "0B" ] || [ "$docker_volumes_size" = "0" ]; then
+            # Получаем путь к volumes
+            volumes_path="/var/lib/docker/volumes"
+            if [ -d "$volumes_path" ]; then
+                # Считаем размер через du
+                total_kb=$(du -sk "$volumes_path" 2>/dev/null | awk '{print $1}')
+                if [ -n "$total_kb" ] && [ "$total_kb" -gt 0 ]; then
                     # Конвертируем в человекочитаемый формат
-                    if [ "$total_size" -gt 1073741824 ]; then
-                        docker_volumes_size="$((total_size / 1073741824))GB"
-                    elif [ "$total_size" -gt 1048576 ]; then
-                        docker_volumes_size="$((total_size / 1048576))MB"
+                    if [ "$total_kb" -gt 1048576 ]; then
+                        docker_volumes_size="$((total_kb / 1048576))GB"
+                    elif [ "$total_kb" -gt 1024 ]; then
+                        docker_volumes_size="$((total_kb / 1024))MB"
                     else
-                        docker_volumes_size="$((total_size / 1024))KB"
+                        docker_volumes_size="${total_kb}KB"
                     fi
                 fi
             fi
         fi
+        
         # Формируем вывод
-        if [ -n "$docker_volumes_size" ] && [ "$docker_volumes_size" != "0B" ]; then
+        if [ -n "$docker_volumes_size" ] && [ "$docker_volumes_size" != "0B" ] && [ "$docker_volumes_size" != "0" ]; then
             docker_volumes_usage="$docker_volumes_count volumes ($docker_volumes_size)"
         else
             docker_volumes_usage="$docker_volumes_count volumes"
