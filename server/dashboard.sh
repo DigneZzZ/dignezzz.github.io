@@ -5,7 +5,7 @@
 # ============================================================================
 # Description: Modern, configurable MOTD dashboard for Linux servers
 # Author: DigneZzZ - https://gig.ovh
-# Version: 2025.10.05.1
+# Version: 2025.10.05.2
 # License: MIT
 # ============================================================================
 
@@ -14,7 +14,7 @@ set -euo pipefail  # Exit on error, undefined variable, pipe failure
 # ============================================================================
 # CONSTANTS
 # ============================================================================
-readonly SCRIPT_VERSION="2025.10.05.1"
+readonly SCRIPT_VERSION="2025.10.05.2"
 readonly SCRIPT_NAME="GIG MOTD Dashboard"
 readonly REMOTE_URL="https://dignezzz.github.io/server/dashboard.sh"
 
@@ -109,14 +109,29 @@ $(_bold "POST-INSTALLATION:")
 
 $(_bold "FEATURES:")
     ✅ Progress bars for CPU, RAM, SWAP, Disk with color indicators
+    ✅ System metrics: processes, zombie detection, I/O wait, open files
+    ✅ Network: active connections, traffic stats, IP addresses
+    ✅ Security: last login, failed logins, NTP sync, Fail2ban stats
+    ✅ Services monitoring: configurable list (nginx, mysql, redis, etc.)
+    ✅ Docker: containers, volumes usage
+    ✅ SSL certificates: expiry warnings (< 30 days)
+    ✅ Additional disks: /home, /var, /data with progress bars
+    ✅ Inodes monitoring: alerts when > 80%
     ✅ Top processes by CPU and RAM usage
-    ✅ Fail2ban statistics (banned IPs count)
     ✅ CPU temperature monitoring (if available)
     ✅ Auto-update checking (on every login)
-    ✅ Configurable blocks via motd-config
+    ✅ Fully configurable via /etc/motdrc or ~/.motdrc
+
+$(_bold "CONFIGURABLE SECTIONS (28 total):")
+    SHOW_UPTIME, SHOW_LOAD, SHOW_CPU, SHOW_RAM, SHOW_SWAP, SHOW_DISK
+    SHOW_ADDITIONAL_DISKS, SHOW_INODES, SHOW_PROCESSES, SHOW_TOP_PROCESSES
+    SHOW_IO_WAIT, SHOW_OPEN_FILES, SHOW_NET, SHOW_IP, SHOW_CONNECTIONS
+    SHOW_LAST_LOGIN, SHOW_FAILED_LOGINS, SHOW_NTP, SHOW_DOCKER
+    SHOW_DOCKER_VOLUMES, SHOW_SERVICES, SHOW_SSL_CERTS, SHOW_SSH
+    SHOW_SECURITY, SHOW_UPDATES, SHOW_AUTOUPDATES, SHOW_FAIL2BAN_STATS, SHOW_TEMP
 
 $(_bold "VERSION FORMAT:")
-    YYYY.MM.DD.MINOR - Example: 2025.10.05.1
+    YYYY.MM.DD.MINOR - Example: 2025.10.05.2
     - YYYY.MM.DD: Release date
     - MINOR: Incremental updates within the same day (1, 2, 3...)
 
@@ -217,10 +232,22 @@ OPTIONS=(
   SHOW_RAM
   SHOW_SWAP
   SHOW_DISK
+  SHOW_ADDITIONAL_DISKS
+  SHOW_INODES
+  SHOW_PROCESSES
   SHOW_TOP_PROCESSES
+  SHOW_IO_WAIT
+  SHOW_OPEN_FILES
   SHOW_NET
   SHOW_IP
+  SHOW_CONNECTIONS
+  SHOW_LAST_LOGIN
+  SHOW_FAILED_LOGINS
+  SHOW_NTP
   SHOW_DOCKER
+  SHOW_DOCKER_VOLUMES
+  SHOW_SERVICES
+  SHOW_SSL_CERTS
   SHOW_SSH
   SHOW_SECURITY
   SHOW_UPDATES
@@ -292,22 +319,56 @@ EOF
 create_motd_global_config() {
     if [ ! -f "$CONFIG_GLOBAL" ]; then
         cat > "$CONFIG_GLOBAL" << EOF
+# GIG MOTD Dashboard Configuration
+# Set to 'true' or 'false' to enable/disable each section
+
+# === System Information ===
 SHOW_UPTIME=true
 SHOW_LOAD=true
 SHOW_CPU=true
 SHOW_RAM=true
 SHOW_SWAP=true
 SHOW_DISK=true
+SHOW_ADDITIONAL_DISKS=true
+SHOW_INODES=true
+SHOW_PROCESSES=true
 SHOW_TOP_PROCESSES=true
+SHOW_IO_WAIT=true
+SHOW_OPEN_FILES=true
+SHOW_TEMP=true
+
+# === Network Information ===
 SHOW_NET=true
 SHOW_IP=true
-SHOW_DOCKER=true
+SHOW_CONNECTIONS=true
+
+# === Security & Access ===
+SHOW_LAST_LOGIN=true
+SHOW_FAILED_LOGINS=true
+SHOW_NTP=true
 SHOW_SSH=true
 SHOW_SECURITY=true
+SHOW_FAIL2BAN_STATS=true
+
+# === Services & Docker ===
+SHOW_DOCKER=true
+SHOW_DOCKER_VOLUMES=true
+SHOW_SERVICES=true
+SHOW_SSL_CERTS=true
+
+# === Updates ===
 SHOW_UPDATES=true
 SHOW_AUTOUPDATES=true
-SHOW_FAIL2BAN_STATS=true
-SHOW_TEMP=true
+
+# === Advanced Settings ===
+# Comma-separated list of services to monitor
+MONITORED_SERVICES=nginx,mysql,postgresql,redis,docker,fail2ban
+
+# Path to SSL certificates directory
+SSL_CERT_PATHS=/etc/letsencrypt/live
+
+# SSL certificate expiry warning threshold (days)
+SSL_WARN_DAYS=30
 EOF
         echo "✅ Создан глобальный конфиг: $CONFIG_GLOBAL"
     else
@@ -347,7 +408,7 @@ cat > "$TMP_FILE" << 'EOF'
 #!/bin/bash
 
 
-CURRENT_VERSION="2025.10.05.1"
+CURRENT_VERSION="2025.10.05.2"
 REMOTE_URL="https://dignezzz.github.io/server/dashboard.sh"
 
 # Проверка обновлений (каждый раз при входе)
@@ -386,6 +447,27 @@ CONFIG_USER="$HOME/.motdrc"
 : "${SHOW_TOP_PROCESSES:=true}"
 : "${SHOW_FAIL2BAN_STATS:=true}"
 : "${SHOW_TEMP:=true}"
+: "${SHOW_PROCESSES:=true}"
+: "${SHOW_LAST_LOGIN:=true}"
+: "${SHOW_CONNECTIONS:=true}"
+: "${SHOW_NTP:=true}"
+: "${SHOW_INODES:=true}"
+: "${SHOW_SERVICES:=true}"
+: "${SHOW_ADDITIONAL_DISKS:=true}"
+: "${SHOW_SSL_CERTS:=true}"
+: "${SHOW_IO_WAIT:=true}"
+: "${SHOW_OPEN_FILES:=true}"
+: "${SHOW_FAILED_LOGINS:=true}"
+: "${SHOW_DOCKER_VOLUMES:=true}"
+
+# Настройка сервисов для мониторинга (через запятую)
+: "${MONITORED_SERVICES:=nginx,mysql,postgresql,redis,docker,fail2ban}"
+
+# Путь к SSL сертификатам (через запятую)
+: "${SSL_CERT_PATHS:=/etc/letsencrypt/live}"
+
+# Порог для предупреждения о сертификатах (дни)
+: "${SSL_WARN_DAYS:=30}"
 
 # === Функция: Прогресс-бар ===
 draw_bar() {
@@ -462,6 +544,132 @@ top_mem=$(ps aux --sort=-%mem | awk 'NR>1 {print $11}' | head -n 3 | paste -sd '
 fail2ban_banned=0
 if command -v fail2ban-client &>/dev/null; then
     fail2ban_banned=$(fail2ban-client status 2>/dev/null | grep "Jail list" | sed 's/.*://;s/,//g' | xargs -n1 fail2ban-client status 2>/dev/null | grep "Currently banned" | awk '{s+=$NF} END {print s+0}')
+fi
+
+# === НОВЫЕ МЕТРИКИ ===
+
+# Процессы
+processes_total=$(ps aux | wc -l)
+processes_zombie=$(ps aux | awk '$8=="Z"' | wc -l)
+processes_running=$(ps aux | awk '$8=="R"' | wc -l)
+
+# Последний логин
+if [ -f /var/log/wtmp ]; then
+    last_login=$(last -n 1 -w | head -n 1 | awk '{printf "%s from %s at %s %s %s", $1, $3, $5, $6, $7}')
+else
+    last_login="n/a"
+fi
+
+# Неудачные попытки входа за 24ч
+failed_logins=0
+if [ -f /var/log/auth.log ]; then
+    failed_logins=$(grep "Failed password" /var/log/auth.log 2>/dev/null | grep "$(date +%b) $(date +%d)" | wc -l)
+elif [ -f /var/log/secure ]; then
+    failed_logins=$(grep "Failed password" /var/log/secure 2>/dev/null | grep "$(date +%b) $(date +%d)" | wc -l)
+fi
+
+# Активные соединения
+connections_total=$(ss -tun | wc -l)
+connections_established=$(ss -tun state established | wc -l)
+
+# NTP синхронизация
+ntp_status="$fail not synchronized"
+ntp_server="n/a"
+if command -v timedatectl &>/dev/null; then
+    if timedatectl status | grep -q "synchronized: yes"; then
+        ntp_status="$ok synchronized"
+        ntp_server=$(timedatectl status | grep "NTP service" | awk '{print $3}')
+        [ -z "$ntp_server" ] && ntp_server="systemd-timesyncd"
+    fi
+elif command -v ntpq &>/dev/null; then
+    if ntpq -p &>/dev/null; then
+        ntp_status="$ok synchronized"
+        ntp_server=$(ntpq -p 2>/dev/null | grep '^*' | awk '{print $1}' | tr -d '*')
+    fi
+fi
+
+# Inode usage
+inodes_total=$(df -i / | awk 'NR==2 {print $2}')
+inodes_used=$(df -i / | awk 'NR==2 {print $3}')
+inodes_percent=$(df -i / | awk 'NR==2 {print $5}' | tr -d '%')
+inodes_data="${inodes_used} / ${inodes_total}"
+
+# Статус сервисов
+services_status=""
+services_down=""
+IFS=',' read -ra SERVICES <<< "$MONITORED_SERVICES"
+for service in "${SERVICES[@]}"; do
+    service=$(echo "$service" | xargs) # trim whitespace
+    if systemctl is-active "$service" &>/dev/null; then
+        services_status="${services_status}$ok ${service} "
+    elif systemctl list-unit-files | grep -q "^${service}.service"; then
+        services_status="${services_status}$fail ${service} "
+        services_down="${services_down}${service}, "
+    fi
+done
+services_down=$(echo "$services_down" | sed 's/, $//')
+
+# Дополнительные диски
+additional_disks=""
+while IFS= read -r line; do
+    mountpoint=$(echo "$line" | awk '{print $6}')
+    if [[ "$mountpoint" != "/" && "$mountpoint" =~ ^/(home|var|data|mnt|opt|backup) ]]; then
+        disk_use=$(echo "$line" | awk '{print $5}' | tr -d '%')
+        disk_size=$(echo "$line" | awk '{print $2}')
+        disk_used_sp=$(echo "$line" | awk '{print $3}')
+        additional_disks="${additional_disks}${mountpoint}:${disk_use}:${disk_used_sp}:${disk_size}|"
+    fi
+done < <(df -h | grep '^/')
+
+# SSL сертификаты
+ssl_expiring=""
+if [ -d "$SSL_CERT_PATHS" ]; then
+    for cert_dir in "$SSL_CERT_PATHS"/*; do
+        if [ -d "$cert_dir" ]; then
+            cert_file="$cert_dir/cert.pem"
+            if [ -f "$cert_file" ]; then
+                domain=$(basename "$cert_dir")
+                expiry_date=$(openssl x509 -in "$cert_file" -noout -enddate 2>/dev/null | cut -d= -f2)
+                if [ -n "$expiry_date" ]; then
+                    expiry_epoch=$(date -d "$expiry_date" +%s 2>/dev/null)
+                    now_epoch=$(date +%s)
+                    days_left=$(( (expiry_epoch - now_epoch) / 86400 ))
+                    if [ "$days_left" -lt "$SSL_WARN_DAYS" ]; then
+                        if [ "$days_left" -lt 7 ]; then
+                            ssl_expiring="${ssl_expiring}$fail ${domain} (${days_left}d) "
+                        else
+                            ssl_expiring="${ssl_expiring}$warn ${domain} (${days_left}d) "
+                        fi
+                    fi
+                fi
+            fi
+        fi
+    done
+fi
+[ -z "$ssl_expiring" ] && ssl_expiring="$ok all certificates valid"
+
+# I/O Wait
+io_wait=$(top -bn1 | grep "Cpu(s)" | awk '{print $10}' | tr -d '%wa,')
+io_wait_status="$ok low"
+if (( $(echo "$io_wait > 20" | bc -l 2>/dev/null || echo 0) )); then
+    io_wait_status="$fail high"
+elif (( $(echo "$io_wait > 10" | bc -l 2>/dev/null || echo 0) )); then
+    io_wait_status="$warn moderate"
+fi
+
+# Open Files
+open_files=$(lsof 2>/dev/null | wc -l || echo "0")
+max_files=$(ulimit -n)
+open_files_percent=$((open_files * 100 / max_files))
+
+# Docker volumes
+docker_volumes_usage=""
+if command -v docker &>/dev/null; then
+    docker_volumes_count=$(docker volume ls -q 2>/dev/null | wc -l)
+    if [ "$docker_volumes_count" -gt 0 ]; then
+        docker_volumes_size=$(docker system df -v 2>/dev/null | grep "^Local Volumes" | awk '{print $4}')
+        docker_volumes_usage="$docker_volumes_count volumes ($docker_volumes_size)"
+    fi
 fi
 
 if command -v docker &>/dev/null; then
@@ -583,6 +791,68 @@ print_section() {
       print_row "Docker" "$docker_msg"
       [ -n "$docker_msg_extra" ] && echo -e "$docker_msg_extra"
       ;;
+    processes)
+      local proc_msg="${processes_total} total, ${processes_running} running"
+      [ "$processes_zombie" -gt 0 ] && proc_msg="$proc_msg, $fail ${processes_zombie} zombie" || proc_msg="$proc_msg, 0 zombie"
+      print_row "Processes" "$proc_msg"
+      ;;
+    last_login)
+      print_row "Last Login" "$last_login"
+      ;;
+    failed_logins)
+      if [ "$failed_logins" -gt 0 ]; then
+        print_row "Failed Logins (24h)" "$warn $failed_logins attempts"
+      fi
+      ;;
+    connections)
+      print_row "Connections" "$connections_total total, $connections_established ESTABLISHED"
+      ;;
+    ntp)
+      print_row "Time Sync" "$ntp_status ($ntp_server)"
+      ;;
+    inodes)
+      if [ "$inodes_percent" -ge 80 ]; then
+        printf " %-20s : " "Inodes /"
+        draw_bar "$inodes_percent"
+        echo " $inodes_data"
+      fi
+      ;;
+    services)
+      if [ -n "$services_status" ]; then
+        print_row "Services" "$services_status"
+      fi
+      ;;
+    additional_disks)
+      if [ -n "$additional_disks" ]; then
+        IFS='|' read -ra DISKS <<< "$additional_disks"
+        for disk_info in "${DISKS[@]}"; do
+          if [ -n "$disk_info" ]; then
+            IFS=':' read -r mountpoint disk_pct disk_used_sp disk_size <<< "$disk_info"
+            printf " %-20s : " "Disk ${mountpoint}"
+            draw_bar "$disk_pct"
+            echo " ${disk_used_sp} / ${disk_size}"
+          fi
+        done
+      fi
+      ;;
+    ssl_certs)
+      if [[ "$ssl_expiring" != *"all certificates valid"* ]]; then
+        print_row "SSL Certificates" "$ssl_expiring"
+      fi
+      ;;
+    io_wait)
+      print_row "I/O Wait" "${io_wait}% ($io_wait_status)"
+      ;;
+    open_files)
+      printf " %-20s : " "Open Files"
+      draw_bar "$open_files_percent"
+      echo " $open_files / $max_files"
+      ;;
+    docker_volumes)
+      if [ -n "$docker_volumes_usage" ]; then
+        print_row "Docker Volumes" "$docker_volumes_usage"
+      fi
+      ;;
     updates)      print_row "Apt Updates" "$update_msg" ;;
     autoupdates)
       print_row "Auto Updates" "$auto_update_status"
@@ -629,10 +899,22 @@ print_section kernel
 [ "$SHOW_RAM" = true ] && print_section ram
 [ "$SHOW_SWAP" = true ] && print_section swap
 [ "$SHOW_DISK" = true ] && print_section disk
+[ "$SHOW_ADDITIONAL_DISKS" = true ] && print_section additional_disks
+[ "$SHOW_INODES" = true ] && print_section inodes
+[ "$SHOW_PROCESSES" = true ] && print_section processes
 [ "$SHOW_TOP_PROCESSES" = true ] && print_section top_processes
+[ "$SHOW_IO_WAIT" = true ] && print_section io_wait
+[ "$SHOW_OPEN_FILES" = true ] && print_section open_files
 [ "$SHOW_NET" = true ] && print_section net
 [ "$SHOW_IP" = true ] && print_section ip
+[ "$SHOW_CONNECTIONS" = true ] && print_section connections
+[ "$SHOW_LAST_LOGIN" = true ] && print_section last_login
+[ "$SHOW_FAILED_LOGINS" = true ] && print_section failed_logins
+[ "$SHOW_NTP" = true ] && print_section ntp
 [ "$SHOW_DOCKER" = true ] && print_section docker
+[ "$SHOW_DOCKER_VOLUMES" = true ] && print_section docker_volumes
+[ "$SHOW_SERVICES" = true ] && print_section services
+[ "$SHOW_SSL_CERTS" = true ] && print_section ssl_certs
 [ "$SHOW_SECURITY" = true ] && print_section ssh_block
 [ "$SHOW_UPDATES" = true ] && print_section updates
 [ "$SHOW_AUTOUPDATES" = true ] && print_section autoupdates
