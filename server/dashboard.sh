@@ -140,6 +140,29 @@ if [ "$INSTALL_USER_MODE" = true ]; then
 fi
 
 
+# === Функция: Установка CLI утилиты motd (viewer) ===
+install_motd_viewer() {
+    echo "📥 Установка команды motd в $MOTD_VIEWER"
+    cat > "$MOTD_VIEWER" << 'EOF'
+#!/bin/bash
+# GIG MOTD Viewer - быстрый просмотр дашборда
+DASHBOARD_FILE_GLOBAL="/etc/update-motd.d/99-dashboard"
+DASHBOARD_FILE_USER="$HOME/.config/gig-motd/99-dashboard"
+
+if [ -f "$DASHBOARD_FILE_GLOBAL" ]; then
+    bash "$DASHBOARD_FILE_GLOBAL"
+elif [ -f "$DASHBOARD_FILE_USER" ]; then
+    bash "$DASHBOARD_FILE_USER"
+else
+    echo "❌ MOTD Dashboard не установлен"
+    echo "💡 Установка: bash <(wget -qO- https://dignezzz.github.io/server/dashboard.sh)"
+    exit 1
+fi
+EOF
+    chmod +x "$MOTD_VIEWER"
+    echo "✅ Установлена команда: $MOTD_VIEWER"
+}
+
 # === Функция: Установка CLI утилиты motd-config ===
 install_motd_config() {
     echo "📥 Установка CLI утилиты motd-config в $MOTD_CONFIG_TOOL"
@@ -162,7 +185,9 @@ OPTIONS=(
   SHOW_LOAD
   SHOW_CPU
   SHOW_RAM
+  SHOW_SWAP
   SHOW_DISK
+  SHOW_TOP_PROCESSES
   SHOW_NET
   SHOW_IP
   SHOW_DOCKER
@@ -170,6 +195,8 @@ OPTIONS=(
   SHOW_SECURITY
   SHOW_UPDATES
   SHOW_AUTOUPDATES
+  SHOW_FAIL2BAN_STATS
+  SHOW_TEMP
 )
 
 print_menu() {
@@ -239,7 +266,9 @@ SHOW_UPTIME=true
 SHOW_LOAD=true
 SHOW_CPU=true
 SHOW_RAM=true
+SHOW_SWAP=true
 SHOW_DISK=true
+SHOW_TOP_PROCESSES=true
 SHOW_NET=true
 SHOW_IP=true
 SHOW_DOCKER=true
@@ -247,6 +276,8 @@ SHOW_SSH=true
 SHOW_SECURITY=true
 SHOW_UPDATES=true
 SHOW_AUTOUPDATES=true
+SHOW_FAIL2BAN_STATS=true
+SHOW_TEMP=true
 EOF
         echo "✅ Создан глобальный конфиг: $CONFIG_GLOBAL"
     else
@@ -319,26 +350,87 @@ CONFIG_USER="$HOME/.motdrc"
 : "${SHOW_SECURITY:=true}"
 : "${SHOW_UPDATES:=true}"
 : "${SHOW_AUTOUPDATES:=true}"
+: "${SHOW_SWAP:=true}"
+: "${SHOW_TOP_PROCESSES:=true}"
+: "${SHOW_FAIL2BAN_STATS:=true}"
+: "${SHOW_TEMP:=true}"
 
+# === Функция: Прогресс-бар ===
+draw_bar() {
+    local percent=$1
+    local width=30
+    local filled=$((percent * width / 100))
+    local empty=$((width - filled))
+    
+    local color=""
+    if [ "$percent" -ge 90 ]; then
+        color="\033[0;31m"  # Красный
+    elif [ "$percent" -ge 70 ]; then
+        color="\033[0;33m"  # Желтый
+    else
+        color="\033[0;32m"  # Зеленый
+    fi
+    
+    printf "${color}["
+    printf "%${filled}s" | tr ' ' '█'
+    printf "%${empty}s" | tr ' ' '░'
+    printf "]\033[0m %3d%%" "$percent"
+}
+
+# === Сбор данных ===
 uptime_str=$(uptime -p)
 loadavg=$(cut -d ' ' -f1-3 /proc/loadavg)
-cpu_usage=$(top -bn1 | grep "Cpu(s)" | awk '{print 100 - $8 "%"}')
-mem_data=$(free -m | awk '/Mem:/ {printf "%.0f%% (%dMB/%dMB)", $3/$2*100, $3, $2}')
-disk_used=$(df -h / | awk 'NR==2 {print $5}' | tr -d '%')
-disk_line=$(df -h / | awk 'NR==2 {print $5 " (" $3 " / " $2 ")"}')
-if [ "$disk_used" -ge 95 ]; then
-    disk_status="$fail $disk_line [CRITICAL: Free up space immediately!]"
-elif [ "$disk_used" -ge 85 ]; then
-    disk_status="$warn $disk_line [Warning: High usage]"
-else
-    disk_status="$ok $disk_line"
+cpu_cores=$(nproc)
+
+# CPU
+cpu_percent=$(top -bn2 -d 0.5 | grep "Cpu(s)" | tail -n1 | awk '{print 100 - $8}' | cut -d. -f1)
+cpu_usage="${cpu_percent}%"
+cpu_temp=""
+if [ -f /sys/class/thermal/thermal_zone0/temp ]; then
+    temp_raw=$(cat /sys/class/thermal/thermal_zone0/temp)
+    temp_c=$((temp_raw / 1000))
+    cpu_temp=" | ${temp_c}°C"
 fi
 
+# RAM
+mem_total=$(free -m | awk '/Mem:/ {print $2}')
+mem_used=$(free -m | awk '/Mem:/ {print $3}')
+mem_percent=$((mem_used * 100 / mem_total))
+mem_data="${mem_used}MB / ${mem_total}MB"
+
+# SWAP
+swap_total=$(free -m | awk '/Swap:/ {print $2}')
+swap_used=$(free -m | awk '/Swap:/ {print $3}')
+swap_percent=0
+swap_data="not configured"
+if [ "$swap_total" -gt 0 ]; then
+    swap_percent=$((swap_used * 100 / swap_total))
+    swap_data="${swap_used}MB / ${swap_total}MB"
+fi
+
+# Disk
+disk_used=$(df -h / | awk 'NR==2 {print $5}' | tr -d '%')
+disk_percent=$disk_used
+disk_total=$(df -h / | awk 'NR==2 {print $2}')
+disk_used_space=$(df -h / | awk 'NR==2 {print $3}')
+disk_data="${disk_used_space} / ${disk_total}"
+
+# Network
 traffic=$(vnstat --oneline 2>/dev/null | awk -F\; '{print $10 " ↓ / " $11 " ↑"}')
 ip_local=$(hostname -I | awk '{print $1}')
 ip_public=$(curl -s ifconfig.me || echo "n/a")
 ip6=$(ip -6 addr show scope global | grep inet6 | awk '{print $2}' | cut -d/ -f1 | head -n1)
 [ -z "$ip6" ] && ip6="n/a"
+
+# Top процессы
+top_cpu=$(ps aux --sort=-%cpu | awk 'NR>1 {print $11}' | head -n 3 | paste -sd ', ')
+top_mem=$(ps aux --sort=-%mem | awk 'NR>1 {print $11}' | head -n 3 | paste -sd ', ')
+
+# Fail2ban статистика
+fail2ban_banned=0
+if command -v fail2ban-client &>/dev/null; then
+    fail2ban_banned=$(fail2ban-client status 2>/dev/null | grep "Jail list" | sed 's/.*://;s/,//g' | xargs -n1 fail2ban-client status 2>/dev/null | grep "Currently banned" | awk '{s+=$NF} END {print s+0}')
+fi
 
 if command -v docker &>/dev/null; then
     docker_total=$(docker ps -a -q | wc -l)
@@ -425,13 +517,36 @@ print_row() {
 print_section() {
   case "$1" in
     uptime)       print_row "System Uptime" "$uptime_str" ;;
-    load)         print_row "Load Average" "$loadavg" ;;
-    cpu)          print_row "CPU Usage" "$cpu_usage" ;;
+    load)         print_row "Load Average" "$loadavg (cores: $cpu_cores)" ;;
+    cpu)          
+      printf " %-20s : " "CPU Usage"
+      draw_bar "$cpu_percent"
+      echo " $cpu_usage$cpu_temp"
+      ;;
     kernel)       print_row "Kernel" "$(uname -r)" ;;
-    ram)          print_row "RAM Usage" "$mem_data" ;;
-    disk)         print_row "Disk Usage" "$disk_status" ;;
+    ram)          
+      printf " %-20s : " "RAM Usage"
+      draw_bar "$mem_percent"
+      echo " $mem_data"
+      ;;
+    swap)
+      if [ "$swap_total" -gt 0 ]; then
+        printf " %-20s : " "SWAP Usage"
+        draw_bar "$swap_percent"
+        echo " $swap_data"
+      fi
+      ;;
+    disk)         
+      printf " %-20s : " "Disk Usage /"
+      draw_bar "$disk_percent"
+      echo " $disk_data"
+      ;;
     net)          print_row "Net Traffic" "$traffic" ;;
     ip)           print_row "IPv4/IPv6" "Local: $ip_local / Public: $ip_public / IPv6: $ip6" ;;
+    top_processes)
+      print_row "Top CPU" "$top_cpu"
+      print_row "Top RAM" "$top_mem"
+      ;;
     docker)
       print_row "Docker" "$docker_msg"
       [ -n "$docker_msg_extra" ] && echo -e "$docker_msg_extra"
@@ -459,6 +574,7 @@ print_section() {
     ssh_block)
       echo " ~~~~~~ ↓↓↓ Security Block ↓↓↓ ~~~~~~"
       print_row "Fail2ban" "$fail2ban_status"
+      [ "$SHOW_FAIL2BAN_STATS" = true ] && [ "$fail2ban_banned" -gt 0 ] && print_row "  Banned IPs" "$fail2ban_banned"
       print_row "CrowdSec" "$crowdsec_status"
       print_row "UFW Firewall" "$ufw_status"
       print_row "SSH Port" "$ssh_port_status"
@@ -479,7 +595,9 @@ echo "$separator"
 [ "$SHOW_CPU" = true ] && print_section cpu
 print_section kernel
 [ "$SHOW_RAM" = true ] && print_section ram
+[ "$SHOW_SWAP" = true ] && print_section swap
 [ "$SHOW_DISK" = true ] && print_section disk
+[ "$SHOW_TOP_PROCESSES" = true ] && print_section top_processes
 [ "$SHOW_NET" = true ] && print_section net
 [ "$SHOW_IP" = true ] && print_section ip
 [ "$SHOW_DOCKER" = true ] && print_section docker
@@ -504,38 +622,60 @@ if [ "$FORCE_MODE" = true ]; then
     mv "$TMP_FILE" "$DASHBOARD_FILE"
 if [ "$INSTALL_USER_MODE" = false ]; then
     chmod +x "$DASHBOARD_FILE"
+    # Отключение стандартного MOTD Ubuntu
+    chmod -x /etc/update-motd.d/00-header 2>/dev/null || true
+    chmod -x /etc/update-motd.d/10-help-text 2>/dev/null || true
+    chmod -x /etc/update-motd.d/50-landscape-sysinfo 2>/dev/null || true
+    chmod -x /etc/update-motd.d/50-motd-news 2>/dev/null || true
+    chmod -x /etc/update-motd.d/80-livepatch 2>/dev/null || true
+    chmod -x /etc/update-motd.d/90-updates-available 2>/dev/null || true
+    chmod -x /etc/update-motd.d/91-release-upgrade 2>/dev/null || true
+    chmod -x /etc/update-motd.d/95-hwe-eol 2>/dev/null || true
 fi
+    install_motd_viewer
     install_motd_config
     create_motd_global_config
     echo "✅ Установлен дашборд: $DASHBOARD_FILE"
+    echo "✅ Установлена команда: $MOTD_VIEWER"
     echo "✅ Установлена CLI утилита: $MOTD_CONFIG_TOOL"
     echo "✅ Создан глобальный конфиг: $CONFIG_GLOBAL"
     echo ""
+    echo "👉 Для просмотра дашборда — выполни: motd"
     echo "👉 Для настройки отображения блоков — выполни: motd-config"
     echo "👉 Обновлённый MOTD появится при следующем входе"
 
 else
     echo "Будет выполнена установка следующего набора:"
     echo "👉 Будет установлен дашборд: $DASHBOARD_FILE"
+    echo "👉 Будет установлена команда: $MOTD_VIEWER"
     echo "👉 Будет установлена CLI утилита: $MOTD_CONFIG_TOOL"
     echo "👉 Будет создан глобальный конфиг: $CONFIG_GLOBAL"
-    echo "👉 Будут отлючены все остальные скрипты в папке /etc/update-motd.d/ чтобы не выводились"
+    echo "👉 Будут отключены все стандартные скрипты Ubuntu MOTD"
     read -p '❓ Установить этот MOTD-дэшборд? [y/N]: ' confirm
     if [[ "$confirm" =~ ^[Yy]$ ]]; then
         mv "$TMP_FILE" "$DASHBOARD_FILE"
 if [ "$INSTALL_USER_MODE" = false ]; then
     chmod +x "$DASHBOARD_FILE"
+    # Отключение стандартного MOTD Ubuntu
+    chmod -x /etc/update-motd.d/00-header 2>/dev/null || true
+    chmod -x /etc/update-motd.d/10-help-text 2>/dev/null || true
+    chmod -x /etc/update-motd.d/50-landscape-sysinfo 2>/dev/null || true
+    chmod -x /etc/update-motd.d/50-motd-news 2>/dev/null || true
+    chmod -x /etc/update-motd.d/80-livepatch 2>/dev/null || true
+    chmod -x /etc/update-motd.d/90-updates-available 2>/dev/null || true
+    chmod -x /etc/update-motd.d/91-release-upgrade 2>/dev/null || true
+    chmod -x /etc/update-motd.d/95-hwe-eol 2>/dev/null || true
 fi
-        if [ "$INSTALL_USER_MODE" = false ]; then
-            find /etc/update-motd.d/ -type f -not -name "99-dashboard" -exec chmod -x {} \;
-        fi
+    install_motd_viewer
     install_motd_config
     create_motd_global_config
     
     echo "✅ Установлен дашборд: $DASHBOARD_FILE"
+    echo "✅ Установлена команда: $MOTD_VIEWER"
     echo "✅ Установлена CLI утилита: $MOTD_CONFIG_TOOL"
     echo "✅ Создан глобальный конфиг: $CONFIG_GLOBAL"
     echo ""
+    echo "👉 Для просмотра дашборда — выполни: motd"
     echo "👉 Для настройки отображения блоков — выполни: motd-config"
     echo "👉 Обновлённый MOTD появится при следующем входе"
     else
