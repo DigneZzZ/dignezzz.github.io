@@ -5,7 +5,7 @@
 # ============================================================================
 # Description: Modern, configurable MOTD dashboard for Linux servers
 # Author: DigneZzZ - https://gig.ovh
-# Version: 2025.10.05.5
+# Version: 2025.10.06.1
 # License: MIT
 # ============================================================================
 
@@ -14,7 +14,7 @@ set -euo pipefail  # Exit on error, undefined variable, pipe failure
 # ============================================================================
 # CONSTANTS
 # ============================================================================
-readonly SCRIPT_VERSION="2025.10.05.5"
+readonly SCRIPT_VERSION="2025.10.06.1"
 readonly SCRIPT_NAME="GIG MOTD Dashboard"
 readonly REMOTE_URL="https://dignezzz.github.io/server/dashboard.sh"
 
@@ -109,24 +109,24 @@ $(_bold "POST-INSTALLATION:")
 
 $(_bold "FEATURES:")
     ✅ Progress bars for CPU, RAM, SWAP, Disk with color indicators
-    ✅ System metrics: processes, zombie detection, I/O wait, open files
-    ✅ Network: active connections, traffic stats, IP addresses
-    ✅ Security: last login, failed logins, NTP sync, Fail2ban stats
+    ✅ System metrics: processes, zombie detection, I/O wait
+    ✅ Network: traffic stats, IP addresses
+    ✅ Security: last login, failed logins, Fail2ban stats
     ✅ Services monitoring: configurable list (nginx, mysql, redis, etc.)
     ✅ Docker: containers, volumes usage
     ✅ SSL certificates: expiry warnings (< 30 days)
     ✅ Additional disks: /home, /var, /data with progress bars
     ✅ Inodes monitoring: alerts when > 80%
-    ✅ Top processes by CPU and RAM usage
     ✅ CPU temperature monitoring (if available)
     ✅ Auto-update checking (on every login)
     ✅ Fully configurable via /etc/motdrc or ~/.motdrc
+    ✅ Optimized for fast loading
 
-$(_bold "CONFIGURABLE SECTIONS (28 total):")
+$(_bold "CONFIGURABLE SECTIONS (24 total):")
     SHOW_UPTIME, SHOW_LOAD, SHOW_CPU, SHOW_RAM, SHOW_SWAP, SHOW_DISK
-    SHOW_ADDITIONAL_DISKS, SHOW_INODES, SHOW_PROCESSES, SHOW_TOP_PROCESSES
-    SHOW_IO_WAIT, SHOW_OPEN_FILES, SHOW_NET, SHOW_IP, SHOW_CONNECTIONS
-    SHOW_LAST_LOGIN, SHOW_FAILED_LOGINS, SHOW_NTP, SHOW_DOCKER
+    SHOW_ADDITIONAL_DISKS, SHOW_INODES, SHOW_PROCESSES
+    SHOW_IO_WAIT, SHOW_NET, SHOW_IP, SHOW_CONNECTIONS
+    SHOW_LAST_LOGIN, SHOW_FAILED_LOGINS, SHOW_DOCKER
     SHOW_DOCKER_VOLUMES, SHOW_SERVICES, SHOW_SSL_CERTS, SHOW_SSH
     SHOW_SECURITY, SHOW_UPDATES, SHOW_AUTOUPDATES, SHOW_FAIL2BAN_STATS, SHOW_TEMP
 
@@ -235,15 +235,12 @@ OPTIONS=(
   SHOW_ADDITIONAL_DISKS
   SHOW_INODES
   SHOW_PROCESSES
-  SHOW_TOP_PROCESSES
   SHOW_IO_WAIT
-  SHOW_OPEN_FILES
   SHOW_NET
   SHOW_IP
   SHOW_CONNECTIONS
   SHOW_LAST_LOGIN
   SHOW_FAILED_LOGINS
-  SHOW_NTP
   SHOW_DOCKER
   SHOW_DOCKER_VOLUMES
   SHOW_SERVICES
@@ -332,20 +329,17 @@ SHOW_DISK=true
 SHOW_ADDITIONAL_DISKS=true
 SHOW_INODES=true
 SHOW_PROCESSES=true
-SHOW_TOP_PROCESSES=true
 SHOW_IO_WAIT=true
-SHOW_OPEN_FILES=true
 SHOW_TEMP=true
 
 # === Network Information ===
 SHOW_NET=true
 SHOW_IP=true
-SHOW_CONNECTIONS=true
+SHOW_CONNECTIONS=false    # Отключено по умолчанию (ss -tun может быть медленным)
 
 # === Security & Access ===
 SHOW_LAST_LOGIN=true
 SHOW_FAILED_LOGINS=true
-SHOW_NTP=true
 SHOW_SSH=true
 SHOW_SECURITY=true
 SHOW_FAIL2BAN_STATS=true
@@ -408,7 +402,7 @@ cat > "$TMP_FILE" << 'EOF'
 #!/bin/bash
 
 
-CURRENT_VERSION="2025.10.05.5"
+CURRENT_VERSION="2025.10.06.1"
 REMOTE_URL="https://dignezzz.github.io/server/dashboard.sh"
 
 # Проверка обновлений (каждый раз при входе)
@@ -444,19 +438,18 @@ CONFIG_USER="$HOME/.motdrc"
 : "${SHOW_UPDATES:=true}"
 : "${SHOW_AUTOUPDATES:=true}"
 : "${SHOW_SWAP:=true}"
-: "${SHOW_TOP_PROCESSES:=true}"
+: "${SHOW_TOP_PROCESSES:=false}"
 : "${SHOW_FAIL2BAN_STATS:=true}"
 : "${SHOW_TEMP:=true}"
 : "${SHOW_PROCESSES:=true}"
 : "${SHOW_LAST_LOGIN:=true}"
-: "${SHOW_CONNECTIONS:=true}"
-: "${SHOW_NTP:=true}"
+: "${SHOW_CONNECTIONS:=false}"
+: "${SHOW_NTP:=false}"
 : "${SHOW_INODES:=true}"
 : "${SHOW_SERVICES:=true}"
 : "${SHOW_ADDITIONAL_DISKS:=true}"
 : "${SHOW_SSL_CERTS:=true}"
 : "${SHOW_IO_WAIT:=true}"
-: "${SHOW_OPEN_FILES:=true}"
 : "${SHOW_FAILED_LOGINS:=true}"
 : "${SHOW_DOCKER_VOLUMES:=true}"
 
@@ -547,9 +540,11 @@ ip_public=$(curl -s ifconfig.me || echo "n/a")
 ip6=$(ip -6 addr show scope global | grep inet6 | awk '{print $2}' | cut -d/ -f1 | head -n1)
 [ -z "$ip6" ] && ip6="n/a"
 
-# Top процессы
-top_cpu=$(ps aux --sort=-%cpu | awk 'NR>1 {print $11}' | head -n 3 | paste -sd ', ')
-top_mem=$(ps aux --sort=-%mem | awk 'NR>1 {print $11}' | head -n 3 | paste -sd ', ')
+# Top процессы (только если включено)
+if [ "$SHOW_TOP_PROCESSES" = true ]; then
+    top_cpu=$(ps aux --sort=-%cpu | awk 'NR>1 {print $11}' | head -n 3 | paste -sd ', ')
+    top_mem=$(ps aux --sort=-%mem | awk 'NR>1 {print $11}' | head -n 3 | paste -sd ', ')
+fi
 
 # Fail2ban статистика
 fail2ban_banned=0
@@ -579,23 +574,27 @@ elif [ -f /var/log/secure ]; then
     failed_logins=$(grep "Failed password" /var/log/secure 2>/dev/null | grep "$(date +%b) $(date +%d)" | wc -l)
 fi
 
-# Активные соединения
-connections_total=$(ss -tun | wc -l)
-connections_established=$(ss -tun state established | wc -l)
+# Активные соединения (только если включено)
+if [ "$SHOW_CONNECTIONS" = true ]; then
+    connections_total=$(ss -tun | wc -l)
+    connections_established=$(ss -tun state established | wc -l)
+fi
 
-# NTP синхронизация
-ntp_status="$fail not synchronized"
-ntp_server="n/a"
-if command -v timedatectl &>/dev/null; then
-    if timedatectl status | grep -q "synchronized: yes"; then
-        ntp_status="$ok synchronized"
-        ntp_server=$(timedatectl status | grep "NTP service" | awk '{print $3}')
-        [ -z "$ntp_server" ] && ntp_server="systemd-timesyncd"
-    fi
-elif command -v ntpq &>/dev/null; then
-    if ntpq -p &>/dev/null; then
-        ntp_status="$ok synchronized"
-        ntp_server=$(ntpq -p 2>/dev/null | grep '^*' | awk '{print $1}' | tr -d '*')
+# NTP синхронизация (только если включено)
+if [ "$SHOW_NTP" = true ]; then
+    ntp_status="$fail not synchronized"
+    ntp_server="n/a"
+    if command -v timedatectl &>/dev/null; then
+        if timedatectl status | grep -q "synchronized: yes"; then
+            ntp_status="$ok synchronized"
+            ntp_server=$(timedatectl status | grep "NTP service" | awk '{print $3}')
+            [ -z "$ntp_server" ] && ntp_server="systemd-timesyncd"
+        fi
+    elif command -v ntpq &>/dev/null; then
+        if ntpq -p &>/dev/null; then
+            ntp_status="$ok synchronized"
+            ntp_server=$(ntpq -p 2>/dev/null | grep '^*' | awk '{print $1}' | tr -d '*')
+        fi
     fi
 fi
 
@@ -666,24 +665,6 @@ if (( $(echo "$io_wait > 20" | bc -l 2>/dev/null || echo 0) )); then
     io_wait_status="$fail high"
 elif (( $(echo "$io_wait > 10" | bc -l 2>/dev/null || echo 0) )); then
     io_wait_status="$warn moderate"
-fi
-
-# Open Files
-open_files=$(lsof 2>/dev/null | wc -l || echo "0")
-# Получаем лимит для конкретного процесса (более реалистичный)
-max_files=$(ulimit -n 2>/dev/null || echo "1024")
-# Если ulimit показывает unlimited или слишком большое значение
-if [ "$max_files" = "unlimited" ] || [ "$max_files" -gt 1000000 ]; then
-    # Используем разумное значение по умолчанию
-    max_files=65536
-fi
-# Правильный расчёт процента
-if [ "$max_files" -gt 0 ]; then
-    open_files_percent=$((open_files * 100 / max_files))
-    # Ограничение максимум 100%
-    [ "$open_files_percent" -gt 100 ] && open_files_percent=100
-else
-    open_files_percent=0
 fi
 
 # Docker volumes
@@ -894,11 +875,6 @@ print_section() {
     io_wait)
       print_row "I/O Wait" "${io_wait}% ($io_wait_status)"
       ;;
-    open_files)
-      printf " %-20s : " "Open Files"
-      draw_bar "$open_files_percent"
-      echo " $open_files / $max_files"
-      ;;
     docker_volumes)
       if [ -n "$docker_volumes_usage" ]; then
         print_row "Docker Volumes" "$docker_volumes_usage"
@@ -955,7 +931,6 @@ print_section kernel
 [ "$SHOW_PROCESSES" = true ] && print_section processes
 [ "$SHOW_TOP_PROCESSES" = true ] && print_section top_processes
 [ "$SHOW_IO_WAIT" = true ] && print_section io_wait
-[ "$SHOW_OPEN_FILES" = true ] && print_section open_files
 [ "$SHOW_NET" = true ] && print_section net
 [ "$SHOW_IP" = true ] && print_section ip
 [ "$SHOW_CONNECTIONS" = true ] && print_section connections
