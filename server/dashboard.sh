@@ -122,7 +122,7 @@ $(_bold "FEATURES:")
     ✅ Fully configurable via /etc/motdrc or ~/.motdrc
     ✅ Optimized for fast loading
 
-$(_bold "CONFIGURABLE SECTIONS (24 total):")
+$(_bold "CONFIGURABLE SECTIONS (25 total):")
     SHOW_UPTIME, SHOW_LOAD, SHOW_CPU, SHOW_RAM, SHOW_SWAP, SHOW_DISK
     SHOW_ADDITIONAL_DISKS, SHOW_INODES, SHOW_PROCESSES
     SHOW_IO_WAIT, SHOW_NET, SHOW_IP, SHOW_CONNECTIONS
