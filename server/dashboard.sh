@@ -725,6 +725,25 @@ draw_bar() {
 }
 
 # === Сбор данных ===
+
+# Определяем OS для корректной работы условий
+if [ -f /etc/os-release ]; then
+    . /etc/os-release
+    case "$ID" in
+        ubuntu|debian|linuxmint)
+            OS_TYPE="debian"
+            ;;
+        centos|rhel|almalinux|rocky|fedora)
+            OS_TYPE="rhel"
+            ;;
+        *)
+            OS_TYPE="unknown"
+            ;;
+    esac
+else
+    OS_TYPE="unknown"
+fi
+
 uptime_str=$(uptime -p)
 loadavg=$(cut -d ' ' -f1-3 /proc/loadavg)
 cpu_cores=$(nproc)
@@ -1076,24 +1095,22 @@ if [ "$SHOW_UPDATES" = true ]; then
     cache_file="/tmp/motd-updates-count"
     # Кэшируем на 1 час (3600 секунд)
     if [ -f "$cache_file" ] && [ $(($(date +%s) - $(stat -c %Y "$cache_file" 2>/dev/null || echo 0))) -lt 3600 ]; then
-        updates=$(cat "$cache_file")
-        update_msg="${updates} package(s) can be updated"
+        updates=$(cat "$cache_file" 2>/dev/null || echo "0")
     else
         if [ "$OS_TYPE" = "debian" ]; then
             updates=$(apt list --upgradable 2>/dev/null | grep -v "Listing" | wc -l)
-            update_msg="${updates} package(s) can be updated"
         elif [ "$OS_TYPE" = "rhel" ]; then
             if command -v dnf &>/dev/null; then
                 updates=$(dnf check-update -q 2>/dev/null | grep -v "^$" | grep -v "^Last metadata" | wc -l)
             else
                 updates=$(yum check-update -q 2>/dev/null | grep -v "^$" | grep -v "^Loaded plugins" | wc -l)
             fi
-            update_msg="${updates} package(s) can be updated"
         else
-            update_msg="unknown OS"
+            updates="0"
         fi
         echo "$updates" > "$cache_file" 2>/dev/null
     fi
+    update_msg="${updates} package(s) can be updated"
 fi
 
 # Автообновления (только если включено) - адаптировано для разных ОС
