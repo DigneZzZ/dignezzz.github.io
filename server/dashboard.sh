@@ -5,7 +5,7 @@
 # ============================================================================
 # Description: Modern, configurable MOTD dashboard for Linux servers
 # Author: DigneZzZ - https://gig.ovh
-# Version: 2025.10.06.3
+# Version: 2025.10.06.4
 # License: MIT
 # ============================================================================
 
@@ -14,7 +14,7 @@ set -euo pipefail  # Exit on error, undefined variable, pipe failure
 # ============================================================================
 # CONSTANTS
 # ============================================================================
-readonly SCRIPT_VERSION="2025.10.06.3"
+readonly SCRIPT_VERSION="2025.10.06.4"
 readonly SCRIPT_NAME="GIG MOTD Dashboard"
 readonly REMOTE_URL="https://dignezzz.github.io/server/dashboard.sh"
 
@@ -631,7 +631,7 @@ cat > "$TMP_FILE" << 'EOF'
 #!/bin/bash
 
 
-CURRENT_VERSION="2025.10.06.3"
+CURRENT_VERSION="2025.10.06.4"
 REMOTE_URL="https://dignezzz.github.io/server/dashboard.sh"
 
 # Проверка обновлений (каждый раз при входе)
@@ -729,45 +729,59 @@ uptime_str=$(uptime -p)
 loadavg=$(cut -d ' ' -f1-3 /proc/loadavg)
 cpu_cores=$(nproc)
 
-# CPU
-cpu_percent=$(top -bn2 -d 0.5 | grep "Cpu(s)" | tail -n1 | awk '{print 100 - $8}' | cut -d. -f1)
-cpu_usage="${cpu_percent}%"
-cpu_temp=""
-if [ -f /sys/class/thermal/thermal_zone0/temp ]; then
-    temp_raw=$(cat /sys/class/thermal/thermal_zone0/temp)
-    temp_c=$((temp_raw / 1000))
-    cpu_temp=" | ${temp_c}°C"
+# CPU (только если включено)
+if [ "$SHOW_CPU" = true ]; then
+    cpu_percent=$(top -bn2 -d 0.5 | grep "Cpu(s)" | tail -n1 | awk '{print 100 - $8}' | cut -d. -f1)
+    cpu_usage="${cpu_percent}%"
+    cpu_temp=""
+    if [ -f /sys/class/thermal/thermal_zone0/temp ]; then
+        temp_raw=$(cat /sys/class/thermal/thermal_zone0/temp)
+        temp_c=$((temp_raw / 1000))
+        cpu_temp=" | ${temp_c}°C"
+    fi
 fi
 
-# RAM
-mem_total=$(free -m | awk '/Mem:/ {print $2}')
-mem_used=$(free -m | awk '/Mem:/ {print $3}')
-mem_percent=$((mem_used * 100 / mem_total))
-mem_data="${mem_used}MB / ${mem_total}MB"
-
-# SWAP
-swap_total=$(free -m | awk '/Swap:/ {print $2}')
-swap_used=$(free -m | awk '/Swap:/ {print $3}')
-swap_percent=0
-swap_data="not configured"
-if [ "$swap_total" -gt 0 ]; then
-    swap_percent=$((swap_used * 100 / swap_total))
-    swap_data="${swap_used}MB / ${swap_total}MB"
+# RAM (только если включено)
+if [ "$SHOW_RAM" = true ]; then
+    mem_total=$(free -m | awk '/Mem:/ {print $2}')
+    mem_used=$(free -m | awk '/Mem:/ {print $3}')
+    mem_percent=$((mem_used * 100 / mem_total))
+    mem_data="${mem_used}MB / ${mem_total}MB"
 fi
 
-# Disk
-disk_used=$(df -h / | awk 'NR==2 {print $5}' | tr -d '%')
-disk_percent=$disk_used
-disk_total=$(df -h / | awk 'NR==2 {print $2}')
-disk_used_space=$(df -h / | awk 'NR==2 {print $3}')
-disk_data="${disk_used_space} / ${disk_total}"
+# SWAP (только если включено)
+if [ "$SHOW_SWAP" = true ]; then
+    swap_total=$(free -m | awk '/Swap:/ {print $2}')
+    swap_used=$(free -m | awk '/Swap:/ {print $3}')
+    swap_percent=0
+    swap_data="not configured"
+    if [ "$swap_total" -gt 0 ]; then
+        swap_percent=$((swap_used * 100 / swap_total))
+        swap_data="${swap_used}MB / ${swap_total}MB"
+    fi
+fi
 
-# Network
-traffic=$(vnstat --oneline 2>/dev/null | awk -F\; '{print $10 " ↓ / " $11 " ↑"}')
-ip_local=$(hostname -I | awk '{print $1}')
-ip_public=$(curl -s ifconfig.me || echo "n/a")
-ip6=$(ip -6 addr show scope global | grep inet6 | awk '{print $2}' | cut -d/ -f1 | head -n1)
-[ -z "$ip6" ] && ip6="n/a"
+# Disk (только если включено)
+if [ "$SHOW_DISK" = true ]; then
+    disk_used=$(df -h / | awk 'NR==2 {print $5}' | tr -d '%')
+    disk_percent=$disk_used
+    disk_total=$(df -h / | awk 'NR==2 {print $2}')
+    disk_used_space=$(df -h / | awk 'NR==2 {print $3}')
+    disk_data="${disk_used_space} / ${disk_total}"
+fi
+
+# Network (только если включено)
+if [ "$SHOW_NET" = true ]; then
+    traffic=$(vnstat --oneline 2>/dev/null | awk -F\; '{print $10 " ↓ / " $11 " ↑"}')
+fi
+
+# IP адреса (только если включено)
+if [ "$SHOW_IP" = true ]; then
+    ip_local=$(hostname -I | awk '{print $1}')
+    ip_public=$(curl -s ifconfig.me || echo "n/a")
+    ip6=$(ip -6 addr show scope global | grep inet6 | awk '{print $2}' | cut -d/ -f1 | head -n1)
+    [ -z "$ip6" ] && ip6="n/a"
+fi
 
 # Top процессы (только если включено)
 if [ "$SHOW_TOP_PROCESSES" = true ]; then
@@ -783,24 +797,30 @@ fi
 
 # === НОВЫЕ МЕТРИКИ ===
 
-# Процессы
-processes_total=$(ps aux | wc -l)
-processes_zombie=$(ps aux | awk '$8=="Z"' | wc -l)
-processes_running=$(ps aux | awk '$8=="R"' | wc -l)
-
-# Последний логин
-if [ -f /var/log/wtmp ]; then
-    last_login=$(last -n 1 -w | head -n 1 | awk '{printf "%s from %s at %s %s %s", $1, $3, $5, $6, $7}')
-else
-    last_login="n/a"
+# Процессы (только если включено)
+if [ "$SHOW_PROCESSES" = true ]; then
+    processes_total=$(ps aux | wc -l)
+    processes_zombie=$(ps aux | awk '$8=="Z"' | wc -l)
+    processes_running=$(ps aux | awk '$8=="R"' | wc -l)
 fi
 
-# Неудачные попытки входа за 24ч
-failed_logins=0
-if [ -f /var/log/auth.log ]; then
-    failed_logins=$(grep "Failed password" /var/log/auth.log 2>/dev/null | grep "$(date +%b) $(date +%d)" | wc -l)
-elif [ -f /var/log/secure ]; then
-    failed_logins=$(grep "Failed password" /var/log/secure 2>/dev/null | grep "$(date +%b) $(date +%d)" | wc -l)
+# Последний логин (только если включено)
+if [ "$SHOW_LAST_LOGIN" = true ]; then
+    if [ -f /var/log/wtmp ]; then
+        last_login=$(last -n 1 -w | head -n 1 | awk '{printf "%s from %s at %s %s %s", $1, $3, $5, $6, $7}')
+    else
+        last_login="n/a"
+    fi
+fi
+
+# Неудачные попытки входа за 24ч (только если включено)
+if [ "$SHOW_FAILED_LOGINS" = true ]; then
+    failed_logins=0
+    if [ -f /var/log/auth.log ]; then
+        failed_logins=$(grep "Failed password" /var/log/auth.log 2>/dev/null | grep "$(date +%b) $(date +%d)" | wc -l)
+    elif [ -f /var/log/secure ]; then
+        failed_logins=$(grep "Failed password" /var/log/secure 2>/dev/null | grep "$(date +%b) $(date +%d)" | wc -l)
+    fi
 fi
 
 # Активные соединения (только если включено)
@@ -827,79 +847,90 @@ if [ "$SHOW_NTP" = true ]; then
     fi
 fi
 
-# Inode usage
-inodes_total=$(df -i / | awk 'NR==2 {print $2}')
-inodes_used=$(df -i / | awk 'NR==2 {print $3}')
-inodes_percent=$(df -i / | awk 'NR==2 {print $5}' | tr -d '%')
-inodes_data="${inodes_used} / ${inodes_total}"
+# Inode usage (только если включено)
+if [ "$SHOW_INODES" = true ]; then
+    inodes_total=$(df -i / | awk 'NR==2 {print $2}')
+    inodes_used=$(df -i / | awk 'NR==2 {print $3}')
+    inodes_percent=$(df -i / | awk 'NR==2 {print $5}' | tr -d '%')
+    inodes_data="${inodes_used} / ${inodes_total}"
+fi
 
-# Статус сервисов
-services_status=""
-services_down=""
-IFS=',' read -ra SERVICES <<< "$MONITORED_SERVICES"
-for service in "${SERVICES[@]}"; do
-    service=$(echo "$service" | xargs) # trim whitespace
-    if systemctl is-active "$service" &>/dev/null; then
-        services_status="${services_status}$ok ${service} "
-    elif systemctl list-unit-files | grep -q "^${service}.service"; then
-        services_status="${services_status}$fail ${service} "
-        services_down="${services_down}${service}, "
-    fi
-done
-services_down=$(echo "$services_down" | sed 's/, $//')
+# Статус сервисов (только если включено)
+if [ "$SHOW_SERVICES" = true ]; then
+    services_status=""
+    services_down=""
+    IFS=',' read -ra SERVICES <<< "$MONITORED_SERVICES"
+    for service in "${SERVICES[@]}"; do
+        service=$(echo "$service" | xargs) # trim whitespace
+        if systemctl is-active "$service" &>/dev/null; then
+            services_status="${services_status}$ok ${service} "
+        elif systemctl list-unit-files | grep -q "^${service}.service"; then
+            services_status="${services_status}$fail ${service} "
+            services_down="${services_down}${service}, "
+        fi
+    done
+    services_down=$(echo "$services_down" | sed 's/, $//')
+fi
 
-# Дополнительные диски
-additional_disks=""
-while IFS= read -r line; do
-    mountpoint=$(echo "$line" | awk '{print $6}')
-    if [[ "$mountpoint" != "/" && "$mountpoint" =~ ^/(home|var|data|mnt|opt|backup) ]]; then
-        disk_use=$(echo "$line" | awk '{print $5}' | tr -d '%')
-        disk_size=$(echo "$line" | awk '{print $2}')
-        disk_used_sp=$(echo "$line" | awk '{print $3}')
-        additional_disks="${additional_disks}${mountpoint}:${disk_use}:${disk_used_sp}:${disk_size}|"
-    fi
-done < <(df -h | grep '^/')
+# Дополнительные диски (только если включено)
+if [ "$SHOW_ADDITIONAL_DISKS" = true ]; then
+    additional_disks=""
+    while IFS= read -r line; do
+        mountpoint=$(echo "$line" | awk '{print $6}')
+        if [[ "$mountpoint" != "/" && "$mountpoint" =~ ^/(home|var|data|mnt|opt|backup) ]]; then
+            disk_use=$(echo "$line" | awk '{print $5}' | tr -d '%')
+            disk_size=$(echo "$line" | awk '{print $2}')
+            disk_used_sp=$(echo "$line" | awk '{print $3}')
+            additional_disks="${additional_disks}${mountpoint}:${disk_use}:${disk_used_sp}:${disk_size}|"
+        fi
+    done < <(df -h | grep '^/')
+fi
 
-# SSL сертификаты
-ssl_expiring=""
-if [ -d "$SSL_CERT_PATHS" ]; then
-    for cert_dir in "$SSL_CERT_PATHS"/*; do
-        if [ -d "$cert_dir" ]; then
-            cert_file="$cert_dir/cert.pem"
-            if [ -f "$cert_file" ]; then
-                domain=$(basename "$cert_dir")
-                expiry_date=$(openssl x509 -in "$cert_file" -noout -enddate 2>/dev/null | cut -d= -f2)
-                if [ -n "$expiry_date" ]; then
-                    expiry_epoch=$(date -d "$expiry_date" +%s 2>/dev/null)
-                    now_epoch=$(date +%s)
-                    days_left=$(( (expiry_epoch - now_epoch) / 86400 ))
-                    if [ "$days_left" -lt "$SSL_WARN_DAYS" ]; then
-                        if [ "$days_left" -lt 7 ]; then
-                            ssl_expiring="${ssl_expiring}$fail ${domain} (${days_left}d) "
-                        else
-                            ssl_expiring="${ssl_expiring}$warn ${domain} (${days_left}d) "
+# SSL сертификаты (только если включено)
+if [ "$SHOW_SSL_CERTS" = true ]; then
+    ssl_expiring=""
+    if [ -d "$SSL_CERT_PATHS" ]; then
+        for cert_dir in "$SSL_CERT_PATHS"/*; do
+            if [ -d "$cert_dir" ]; then
+                cert_file="$cert_dir/cert.pem"
+                if [ -f "$cert_file" ]; then
+                    domain=$(basename "$cert_dir")
+                    expiry_date=$(openssl x509 -in "$cert_file" -noout -enddate 2>/dev/null | cut -d= -f2)
+                    if [ -n "$expiry_date" ]; then
+                        expiry_epoch=$(date -d "$expiry_date" +%s 2>/dev/null)
+                        now_epoch=$(date +%s)
+                        days_left=$(( (expiry_epoch - now_epoch) / 86400 ))
+                        if [ "$days_left" -lt "$SSL_WARN_DAYS" ]; then
+                            if [ "$days_left" -lt 7 ]; then
+                                ssl_expiring="${ssl_expiring}$fail ${domain} (${days_left}d) "
+                            else
+                                ssl_expiring="${ssl_expiring}$warn ${domain} (${days_left}d) "
                         fi
                     fi
                 fi
             fi
         fi
     done
-fi
-[ -z "$ssl_expiring" ] && ssl_expiring="$ok all certificates valid"
-
-# I/O Wait
-io_wait=$(top -bn1 | grep "Cpu(s)" | awk '{print $10}' | tr -d '%wa,')
-io_wait_status="$ok low"
-if (( $(echo "$io_wait > 20" | bc -l 2>/dev/null || echo 0) )); then
-    io_wait_status="$fail high"
-elif (( $(echo "$io_wait > 10" | bc -l 2>/dev/null || echo 0) )); then
-    io_wait_status="$warn moderate"
+    fi
+    [ -z "$ssl_expiring" ] && ssl_expiring="$ok all certificates valid"
 fi
 
-# Docker volumes
-docker_volumes_usage=""
-if command -v docker &>/dev/null; then
-    docker_volumes_count=$(docker volume ls -q 2>/dev/null | wc -l)
+# I/O Wait (только если включено)
+if [ "$SHOW_IO_WAIT" = true ]; then
+    io_wait=$(top -bn1 | grep "Cpu(s)" | awk '{print $10}' | tr -d '%wa,')
+    io_wait_status="$ok low"
+    if (( $(echo "$io_wait > 20" | bc -l 2>/dev/null || echo 0) )); then
+        io_wait_status="$fail high"
+    elif (( $(echo "$io_wait > 10" | bc -l 2>/dev/null || echo 0) )); then
+        io_wait_status="$warn moderate"
+    fi
+fi
+
+# Docker volumes (только если включено)
+if [ "$SHOW_DOCKER_VOLUMES" = true ]; then
+    docker_volumes_usage=""
+    if command -v docker &>/dev/null; then
+        docker_volumes_count=$(docker volume ls -q 2>/dev/null | wc -l)
     if [ "$docker_volumes_count" -gt 0 ]; then
         # Метод 1: через docker system df
         docker_volumes_size=$(docker system df 2>/dev/null | grep "Local Volumes" | awk '{print $3}')
@@ -931,82 +962,104 @@ if command -v docker &>/dev/null; then
             docker_volumes_usage="$docker_volumes_count volumes"
         fi
     fi
-fi
-
-if command -v docker &>/dev/null; then
-    docker_total=$(docker ps -a -q | wc -l)
-    docker_running=$(docker ps -q | wc -l)
-    docker_stopped=$((docker_total - docker_running))
-    docker_msg="$ok ${docker_running} running / ${docker_stopped} stopped"
-    bad_containers=$(docker ps -a --filter "status=exited" --filter "status=restarting" --format '⛔ {{.Names}} ({{.Status}})')
-    if [ -n "$bad_containers" ]; then
-        docker_msg="$fail Issues: $docker_running running / $docker_stopped stopped"
-        docker_msg_extra=$(echo "$bad_containers" | sed 's/^/                    /')
     fi
-else
-    docker_msg="$warn not installed"
 fi
 
-ssh_users=$(who | wc -l)
-ssh_ips=$(who | awk '{print $5}' | tr -d '()' | sort | uniq | paste -sd ', ' -)
-
-if command -v fail2ban-client &>/dev/null; then
-    fail2ban_status="$ok active"
-else
-    fail2ban_status="$fail not installed"
-fi
-
-if command -v ufw &>/dev/null; then
-    ufw_status=$(ufw status | grep -i "Status" | awk '{print $2}')
-    if [[ "$ufw_status" == "active" ]]; then
-        ufw_status="$ok enabled"
-    else
-        ufw_status="$fail disabled"
-    fi
-else
-    ufw_status="$fail not installed"
-fi
-
-if systemctl is-active crowdsec &>/dev/null; then
-    crowdsec_status="$ok active"
-else
-    crowdsec_status="$fail not running"
-fi
-
-ssh_port=$(grep -Ei '^Port ' /etc/ssh/sshd_config | awk '{print $2}' | head -n1)
-[ -z "$ssh_port" ] && ssh_port=22
-[ "$ssh_port" != "22" ] && ssh_port_status="$ok non-standard port ($ssh_port)" || ssh_port_status="$warn default port (22)"
-
-permit_root=$(sshd -T 2>/dev/null | grep -i permitrootlogin | awk '{print $2}')
-case "$permit_root" in
-    yes) root_login_status="$fail enabled" ;;
-    no) root_login_status="$ok disabled" ;;
-    *) root_login_status="$warn limited ($permit_root)" ;;
-esac
-
-password_auth=$(grep -Ei '^PasswordAuthentication' /etc/ssh/sshd_config | awk '{print $2}')
-[ "$password_auth" != "yes" ] && password_auth_status="$ok disabled" || password_auth_status="$fail enabled"
-
-updates=$(apt list --upgradable 2>/dev/null | grep -v "Listing" | wc -l)
-update_msg="${updates} package(s) can be updated"
-
-auto_update_status=""
-if dpkg -s unattended-upgrades &>/dev/null && command -v unattended-upgrade &>/dev/null; then
-    if grep -q 'Unattended-Upgrade "1";' /etc/apt/apt.conf.d/20auto-upgrades 2>/dev/null; then
-        if systemctl is-enabled apt-daily.timer &>/dev/null && systemctl is-enabled apt-daily-upgrade.timer &>/dev/null; then
-            if grep -q "Installing" /var/log/unattended-upgrades/unattended-upgrades.log 2>/dev/null; then
-                auto_update_status="$ok working"
-            else
-                auto_update_status="$ok enabled"
-            fi
-        else
-            auto_update_status="$warn config enabled, timers disabled"
+# Docker containers (только если включено)
+if [ "$SHOW_DOCKER" = true ]; then
+    if command -v docker &>/dev/null; then
+        docker_total=$(docker ps -a -q | wc -l)
+        docker_running=$(docker ps -q | wc -l)
+        docker_stopped=$((docker_total - docker_running))
+        docker_msg="$ok ${docker_running} running / ${docker_stopped} stopped"
+        bad_containers=$(docker ps -a --filter "status=exited" --filter "status=restarting" --format '⛔ {{.Names}} ({{.Status}})')
+        if [ -n "$bad_containers" ]; then
+            docker_msg="$fail Issues: $docker_running running / $docker_stopped stopped"
+            docker_msg_extra=$(echo "$bad_containers" | sed 's/^/                    /')
         fi
     else
-        auto_update_status="$warn installed, config disabled"
+        docker_msg="$warn not installed"
     fi
-else
-    auto_update_status="$fail not installed"
+fi
+
+# SSH info (только если включено)
+if [ "$SHOW_SSH" = true ] || [ "$SHOW_SECURITY" = true ]; then
+    ssh_users=$(who | wc -l)
+    ssh_ips=$(who | awk '{print $5}' | tr -d '()' | sort | uniq | paste -sd ', ' -)
+fi
+
+# Fail2ban (только если включено)
+if [ "$SHOW_FAIL2BAN_STATS" = true ]; then
+    if command -v fail2ban-client &>/dev/null; then
+        fail2ban_status="$ok active"
+    else
+        fail2ban_status="$fail not installed"
+    fi
+fi
+
+# UFW (только если включено для Security блока)
+if [ "$SHOW_SECURITY" = true ]; then
+    if command -v ufw &>/dev/null; then
+        ufw_status=$(ufw status | grep -i "Status" | awk '{print $2}')
+        if [[ "$ufw_status" == "active" ]]; then
+            ufw_status="$ok enabled"
+        else
+            ufw_status="$fail disabled"
+        fi
+    else
+        ufw_status="$fail not installed"
+    fi
+fi
+
+# Security блок - CrowdSec, SSH, Root login, Password auth (только если включено)
+if [ "$SHOW_SECURITY" = true ]; then
+    if systemctl is-active crowdsec &>/dev/null; then
+        crowdsec_status="$ok active"
+    else
+        crowdsec_status="$fail not running"
+    fi
+
+    ssh_port=$(grep -Ei '^Port ' /etc/ssh/sshd_config | awk '{print $2}' | head -n1)
+    [ -z "$ssh_port" ] && ssh_port=22
+    [ "$ssh_port" != "22" ] && ssh_port_status="$ok non-standard port ($ssh_port)" || ssh_port_status="$warn default port (22)"
+
+    permit_root=$(sshd -T 2>/dev/null | grep -i permitrootlogin | awk '{print $2}')
+    case "$permit_root" in
+        yes) root_login_status="$fail enabled" ;;
+        no) root_login_status="$ok disabled" ;;
+        *) root_login_status="$warn limited ($permit_root)" ;;
+    esac
+
+    password_auth=$(grep -Ei '^PasswordAuthentication' /etc/ssh/sshd_config | awk '{print $2}')
+    [ "$password_auth" != "yes" ] && password_auth_status="$ok disabled" || password_auth_status="$fail enabled"
+fi
+
+# Обновления (только если включено)
+if [ "$SHOW_UPDATES" = true ]; then
+    updates=$(apt list --upgradable 2>/dev/null | grep -v "Listing" | wc -l)
+    update_msg="${updates} package(s) can be updated"
+fi
+
+# Автообновления (только если включено)
+if [ "$SHOW_AUTOUPDATES" = true ]; then
+    auto_update_status=""
+    if dpkg -s unattended-upgrades &>/dev/null && command -v unattended-upgrade &>/dev/null; then
+        if grep -q 'Unattended-Upgrade "1";' /etc/apt/apt.conf.d/20auto-upgrades 2>/dev/null; then
+            if systemctl is-enabled apt-daily.timer &>/dev/null && systemctl is-enabled apt-daily-upgrade.timer &>/dev/null; then
+                if grep -q "Installing" /var/log/unattended-upgrades/unattended-upgrades.log 2>/dev/null; then
+                    auto_update_status="$ok working"
+                else
+                    auto_update_status="$ok enabled"
+                fi
+            else
+                auto_update_status="$warn config enabled, timers disabled"
+            fi
+        else
+            auto_update_status="$warn installed, config disabled"
+        fi
+    else
+        auto_update_status="$fail not installed"
+    fi
 fi
 
 print_row() {
