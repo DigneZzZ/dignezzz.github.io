@@ -732,7 +732,6 @@ cpu_cores=$(nproc)
 # CPU (только если включено)
 if [ "$SHOW_CPU" = true ]; then
     cpu_percent=$(top -bn2 -d 0.5 | grep "Cpu(s)" | tail -n1 | awk '{print 100 - $8}' | cut -d. -f1)
-    cpu_usage="${cpu_percent}%"
     cpu_temp=""
     if [ -f /sys/class/thermal/thermal_zone0/temp ]; then
         temp_raw=$(cat /sys/class/thermal/thermal_zone0/temp)
@@ -1075,7 +1074,7 @@ print_section() {
     cpu)          
       printf " %-20s : " "CPU Usage"
       draw_bar "$cpu_percent"
-      echo " $cpu_usage$cpu_temp"
+      echo "$cpu_temp"
       ;;
     kernel)       print_row "Kernel" "$(uname -r)" ;;
     ram)          
