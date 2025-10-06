@@ -10,3 +10,4 @@ server/CHANGELOG.md
 server/PERFORMANCE.md
 server/FORUM_POST.md
 server/MOTD_CONFIG_EXAMPLE.md
+server/dashboard-debug.sh

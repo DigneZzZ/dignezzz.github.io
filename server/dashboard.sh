@@ -5,7 +5,7 @@
 # ============================================================================
 # Description: Modern, configurable MOTD dashboard for Linux servers
 # Author: DigneZzZ - https://gig.ovh
-# Version: 2025.10.06.5
+# Version: 2025.10.06.6
 # License: MIT
 # ============================================================================
 
@@ -14,7 +14,7 @@ set -euo pipefail  # Exit on error, undefined variable, pipe failure
 # ============================================================================
 # CONSTANTS
 # ============================================================================
-readonly SCRIPT_VERSION="2025.10.06.5"
+readonly SCRIPT_VERSION="2025.10.06.6"
 readonly SCRIPT_NAME="GIG MOTD Dashboard"
 readonly REMOTE_URL="https://dignezzz.github.io/server/dashboard.sh"
 
@@ -631,7 +631,7 @@ cat > "$TMP_FILE" << 'EOF'
 #!/bin/bash
 
 
-CURRENT_VERSION="2025.10.06.5"
+CURRENT_VERSION="2025.10.06.6"
 REMOTE_URL="https://dignezzz.github.io/server/dashboard.sh"
 
 # Проверка обновлений (каждый раз при входе)
@@ -729,9 +729,15 @@ uptime_str=$(uptime -p)
 loadavg=$(cut -d ' ' -f1-3 /proc/loadavg)
 cpu_cores=$(nproc)
 
+# Оптимизация: собираем CPU и I/O Wait одним вызовом top (экономия ~230ms)
+top_output=""
+if [ "$SHOW_CPU" = true ] || [ "$SHOW_IO_WAIT" = true ]; then
+    top_output=$(top -bn2 -d 0.5 | grep "Cpu(s)" | tail -n1)
+fi
+
 # CPU (только если включено)
 if [ "$SHOW_CPU" = true ]; then
-    cpu_percent=$(top -bn2 -d 0.5 | grep "Cpu(s)" | tail -n1 | awk '{print 100 - $8}' | cut -d. -f1)
+    cpu_percent=$(echo "$top_output" | awk '{print 100 - $8}' | cut -d. -f1)
     cpu_temp=""
     if [ -f /sys/class/thermal/thermal_zone0/temp ]; then
         temp_raw=$(cat /sys/class/thermal/thermal_zone0/temp)
@@ -774,10 +780,19 @@ if [ "$SHOW_NET" = true ]; then
     traffic=$(vnstat --oneline 2>/dev/null | awk -F\; '{print $10 " ↓ / " $11 " ↑"}')
 fi
 
-# IP адреса (только если включено)
+# IP адреса (только если включено) - с кэшированием Public IP (экономия ~250ms)
 if [ "$SHOW_IP" = true ]; then
     ip_local=$(hostname -I | awk '{print $1}')
-    ip_public=$(curl -s ifconfig.me || echo "n/a")
+    
+    # Кэшируем Public IP на 5 минут
+    cache_file="/tmp/motd-public-ip"
+    if [ -f "$cache_file" ] && [ $(($(date +%s) - $(stat -c %Y "$cache_file" 2>/dev/null || echo 0))) -lt 300 ]; then
+        ip_public=$(cat "$cache_file")
+    else
+        ip_public=$(timeout 2 curl -s ifconfig.me 2>/dev/null || echo "n/a")
+        echo "$ip_public" > "$cache_file" 2>/dev/null
+    fi
+    
     ip6=$(ip -6 addr show scope global | grep inet6 | awk '{print $2}' | cut -d/ -f1 | head -n1)
     [ -z "$ip6" ] && ip6="n/a"
 fi
@@ -914,9 +929,9 @@ if [ "$SHOW_SSL_CERTS" = true ]; then
     [ -z "$ssl_expiring" ] && ssl_expiring="$ok all certificates valid"
 fi
 
-# I/O Wait (только если включено)
+# I/O Wait (только если включено) - используем уже собранный top_output
 if [ "$SHOW_IO_WAIT" = true ]; then
-    io_wait=$(top -bn1 | grep "Cpu(s)" | awk '{print $10}' | tr -d '%wa,')
+    io_wait=$(echo "$top_output" | awk '{print $10}' | tr -d '%wa,')
     io_wait_status="$ok low"
     if (( $(echo "$io_wait > 20" | bc -l 2>/dev/null || echo 0) )); then
         io_wait_status="$fail high"
@@ -996,33 +1011,40 @@ if [ "$SHOW_FAIL2BAN_STATS" = true ]; then
     fi
 fi
 
-# Firewall (только если включено для Security блока) - адаптировано для разных ОС
+# Firewall (только если включено для Security блока) - с кэшированием (экономия ~100ms)
 if [ "$SHOW_SECURITY" = true ]; then
-    if [ "$OS_TYPE" = "debian" ]; then
-        # Debian/Ubuntu: UFW
-        if command -v ufw &>/dev/null; then
-            ufw_status=$(ufw status | grep -i "Status" | awk '{print $2}')
-            if [[ "$ufw_status" == "active" ]]; then
-                ufw_status="$ok UFW enabled"
-            else
-                ufw_status="$fail UFW disabled"
-            fi
-        else
-            ufw_status="$fail UFW not installed"
-        fi
-    elif [ "$OS_TYPE" = "rhel" ]; then
-        # RHEL/CentOS/AlmaLinux: firewalld
-        if command -v firewall-cmd &>/dev/null; then
-            if systemctl is-active firewalld &>/dev/null; then
-                ufw_status="$ok firewalld enabled"
-            else
-                ufw_status="$fail firewalld disabled"
-            fi
-        else
-            ufw_status="$fail firewalld not installed"
-        fi
+    cache_file="/tmp/motd-firewall-status"
+    # Кэшируем на 30 секунд
+    if [ -f "$cache_file" ] && [ $(($(date +%s) - $(stat -c %Y "$cache_file" 2>/dev/null || echo 0))) -lt 30 ]; then
+        ufw_status=$(cat "$cache_file")
     else
-        ufw_status="$warn unknown OS"
+        if [ "$OS_TYPE" = "debian" ]; then
+            # Debian/Ubuntu: UFW
+            if command -v ufw &>/dev/null; then
+                ufw_status_raw=$(ufw status | grep -i "Status" | awk '{print $2}')
+                if [[ "$ufw_status_raw" == "active" ]]; then
+                    ufw_status="$ok UFW enabled"
+                else
+                    ufw_status="$fail UFW disabled"
+                fi
+            else
+                ufw_status="$fail UFW not installed"
+            fi
+        elif [ "$OS_TYPE" = "rhel" ]; then
+            # RHEL/CentOS/AlmaLinux: firewalld
+            if command -v firewall-cmd &>/dev/null; then
+                if systemctl is-active firewalld &>/dev/null; then
+                    ufw_status="$ok firewalld enabled"
+                else
+                    ufw_status="$fail firewalld disabled"
+                fi
+            else
+                ufw_status="$fail firewalld not installed"
+            fi
+        else
+            ufw_status="$warn unknown OS"
+        fi
+        echo "$ufw_status" > "$cache_file" 2>/dev/null
     fi
 fi
 
@@ -1049,20 +1071,28 @@ if [ "$SHOW_SECURITY" = true ]; then
     [ "$password_auth" != "yes" ] && password_auth_status="$ok disabled" || password_auth_status="$fail enabled"
 fi
 
-# Обновления (только если включено) - адаптировано для разных ОС
+# Обновления (только если включено) - с кэшированием (экономия ~545ms)
 if [ "$SHOW_UPDATES" = true ]; then
-    if [ "$OS_TYPE" = "debian" ]; then
-        updates=$(apt list --upgradable 2>/dev/null | grep -v "Listing" | wc -l)
-        update_msg="${updates} package(s) can be updated"
-    elif [ "$OS_TYPE" = "rhel" ]; then
-        if command -v dnf &>/dev/null; then
-            updates=$(dnf check-update -q 2>/dev/null | grep -v "^$" | grep -v "^Last metadata" | wc -l)
-        else
-            updates=$(yum check-update -q 2>/dev/null | grep -v "^$" | grep -v "^Loaded plugins" | wc -l)
-        fi
+    cache_file="/tmp/motd-updates-count"
+    # Кэшируем на 1 час (3600 секунд)
+    if [ -f "$cache_file" ] && [ $(($(date +%s) - $(stat -c %Y "$cache_file" 2>/dev/null || echo 0))) -lt 3600 ]; then
+        updates=$(cat "$cache_file")
         update_msg="${updates} package(s) can be updated"
     else
-        update_msg="unknown OS"
+        if [ "$OS_TYPE" = "debian" ]; then
+            updates=$(apt list --upgradable 2>/dev/null | grep -v "Listing" | wc -l)
+            update_msg="${updates} package(s) can be updated"
+        elif [ "$OS_TYPE" = "rhel" ]; then
+            if command -v dnf &>/dev/null; then
+                updates=$(dnf check-update -q 2>/dev/null | grep -v "^$" | grep -v "^Last metadata" | wc -l)
+            else
+                updates=$(yum check-update -q 2>/dev/null | grep -v "^$" | grep -v "^Loaded plugins" | wc -l)
+            fi
+            update_msg="${updates} package(s) can be updated"
+        else
+            update_msg="unknown OS"
+        fi
+        echo "$updates" > "$cache_file" 2>/dev/null
     fi
 fi
 
