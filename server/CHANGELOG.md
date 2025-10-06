@@ -9,6 +9,40 @@
 
 ---
 
+## [2025.10.06.5] - 2025-10-06
+
+### 🔧 Изменения конфигурации
+
+**SHOW_INODES отключен по умолчанию**:
+- Inodes — специфичная метрика файловой системы, редко востребованная обычными пользователями
+- Можно легко включить через `motd-config` при необходимости
+- Изменено в двух местах: значение по умолчанию и fallback значение
+
+### 🌍 Улучшение мультиплатформенности
+
+**Команды обновлений**:
+- ✅ Debian/Ubuntu: `apt list --upgradable 2>/dev/null | grep -v "Listing" | wc -l`
+- ✅ CentOS/AlmaLinux/Rocky: `dnf check-update -q | grep -E "^\S+\.\S+" | wc -l` или `yum check-update -q 2>/dev/null | grep -E "^\S+\.\S+" | wc -l`
+- Команда автоматически выбирается в зависимости от OS_TYPE
+
+**Автообновления**:
+- ✅ Debian/Ubuntu: проверка `unattended-upgrades` через systemctl и `/etc/apt/apt.conf.d/20auto-upgrades`
+- ✅ CentOS/AlmaLinux/Rocky: проверка `dnf-automatic.timer` или `yum-cron.service`
+- Отображает корректный статус для каждой ОС
+
+**Firewall**:
+- ✅ Debian/Ubuntu: поддержка UFW (`ufw status`)
+- ✅ CentOS/AlmaLinux/Rocky: поддержка firewalld (`firewall-cmd --state`)
+- Изменена метка с "UFW Firewall" на универсальную "Firewall"
+- Корректный статус для обоих типов firewall
+
+**Тестирование**:
+- ✅ Проверено на Debian 11/12
+- ✅ Проверено на Ubuntu 20.04/22.04
+- ⚠️ Требуется тестирование на CentOS/AlmaLinux/Rocky для окончательной валидации
+
+---
+
 ## [2025.10.06.4] - 2025-10-06
 
 ### 🐛 Критическое исправление
