@@ -5,7 +5,7 @@
 # ============================================================================
 # Description: Modern, configurable MOTD dashboard for Linux servers
 # Author: DigneZzZ - https://gig.ovh
-# Version: 2025.10.06.4
+# Version: 2025.10.06.5
 # License: MIT
 # ============================================================================
 
@@ -549,7 +549,7 @@ SHOW_RAM=true
 SHOW_SWAP=true
 SHOW_DISK=true
 SHOW_ADDITIONAL_DISKS=true
-SHOW_INODES=true
+SHOW_INODES=false         # Отключено по умолчанию (специфичная метрика)
 SHOW_PROCESSES=true
 SHOW_IO_WAIT=true
 SHOW_TEMP=true
@@ -674,7 +674,7 @@ CONFIG_USER="$HOME/.motdrc"
 : "${SHOW_LAST_LOGIN:=true}"
 : "${SHOW_CONNECTIONS:=false}"
 : "${SHOW_NTP:=false}"
-: "${SHOW_INODES:=true}"
+: "${SHOW_INODES:=false}"
 : "${SHOW_SERVICES:=true}"
 : "${SHOW_ADDITIONAL_DISKS:=true}"
 : "${SHOW_SSL_CERTS:=true}"
@@ -996,17 +996,33 @@ if [ "$SHOW_FAIL2BAN_STATS" = true ]; then
     fi
 fi
 
-# UFW (только если включено для Security блока)
+# Firewall (только если включено для Security блока) - адаптировано для разных ОС
 if [ "$SHOW_SECURITY" = true ]; then
-    if command -v ufw &>/dev/null; then
-        ufw_status=$(ufw status | grep -i "Status" | awk '{print $2}')
-        if [[ "$ufw_status" == "active" ]]; then
-            ufw_status="$ok enabled"
+    if [ "$OS_TYPE" = "debian" ]; then
+        # Debian/Ubuntu: UFW
+        if command -v ufw &>/dev/null; then
+            ufw_status=$(ufw status | grep -i "Status" | awk '{print $2}')
+            if [[ "$ufw_status" == "active" ]]; then
+                ufw_status="$ok UFW enabled"
+            else
+                ufw_status="$fail UFW disabled"
+            fi
         else
-            ufw_status="$fail disabled"
+            ufw_status="$fail UFW not installed"
+        fi
+    elif [ "$OS_TYPE" = "rhel" ]; then
+        # RHEL/CentOS/AlmaLinux: firewalld
+        if command -v firewall-cmd &>/dev/null; then
+            if systemctl is-active firewalld &>/dev/null; then
+                ufw_status="$ok firewalld enabled"
+            else
+                ufw_status="$fail firewalld disabled"
+            fi
+        else
+            ufw_status="$fail firewalld not installed"
         fi
     else
-        ufw_status="$fail not installed"
+        ufw_status="$warn unknown OS"
     fi
 fi
 
@@ -1033,31 +1049,74 @@ if [ "$SHOW_SECURITY" = true ]; then
     [ "$password_auth" != "yes" ] && password_auth_status="$ok disabled" || password_auth_status="$fail enabled"
 fi
 
-# Обновления (только если включено)
+# Обновления (только если включено) - адаптировано для разных ОС
 if [ "$SHOW_UPDATES" = true ]; then
-    updates=$(apt list --upgradable 2>/dev/null | grep -v "Listing" | wc -l)
-    update_msg="${updates} package(s) can be updated"
+    if [ "$OS_TYPE" = "debian" ]; then
+        updates=$(apt list --upgradable 2>/dev/null | grep -v "Listing" | wc -l)
+        update_msg="${updates} package(s) can be updated"
+    elif [ "$OS_TYPE" = "rhel" ]; then
+        if command -v dnf &>/dev/null; then
+            updates=$(dnf check-update -q 2>/dev/null | grep -v "^$" | grep -v "^Last metadata" | wc -l)
+        else
+            updates=$(yum check-update -q 2>/dev/null | grep -v "^$" | grep -v "^Loaded plugins" | wc -l)
+        fi
+        update_msg="${updates} package(s) can be updated"
+    else
+        update_msg="unknown OS"
+    fi
 fi
 
-# Автообновления (только если включено)
+# Автообновления (только если включено) - адаптировано для разных ОС
 if [ "$SHOW_AUTOUPDATES" = true ]; then
     auto_update_status=""
-    if dpkg -s unattended-upgrades &>/dev/null && command -v unattended-upgrade &>/dev/null; then
-        if grep -q 'Unattended-Upgrade "1";' /etc/apt/apt.conf.d/20auto-upgrades 2>/dev/null; then
-            if systemctl is-enabled apt-daily.timer &>/dev/null && systemctl is-enabled apt-daily-upgrade.timer &>/dev/null; then
-                if grep -q "Installing" /var/log/unattended-upgrades/unattended-upgrades.log 2>/dev/null; then
-                    auto_update_status="$ok working"
+    
+    if [ "$OS_TYPE" = "debian" ]; then
+        # Debian/Ubuntu: unattended-upgrades
+        if dpkg -s unattended-upgrades &>/dev/null && command -v unattended-upgrade &>/dev/null; then
+            if grep -q 'Unattended-Upgrade "1";' /etc/apt/apt.conf.d/20auto-upgrades 2>/dev/null; then
+                if systemctl is-enabled apt-daily.timer &>/dev/null && systemctl is-enabled apt-daily-upgrade.timer &>/dev/null; then
+                    if grep -q "Installing" /var/log/unattended-upgrades/unattended-upgrades.log 2>/dev/null; then
+                        auto_update_status="$ok working"
+                    else
+                        auto_update_status="$ok enabled"
+                    fi
                 else
-                    auto_update_status="$ok enabled"
+                    auto_update_status="$warn config enabled, timers disabled"
                 fi
             else
-                auto_update_status="$warn config enabled, timers disabled"
+                auto_update_status="$warn installed, config disabled"
             fi
         else
-            auto_update_status="$warn installed, config disabled"
+            auto_update_status="$fail not installed"
+        fi
+        
+    elif [ "$OS_TYPE" = "rhel" ]; then
+        # RHEL/CentOS/AlmaLinux: dnf-automatic или yum-cron
+        if command -v dnf &>/dev/null; then
+            # CentOS 8+, AlmaLinux, Rocky
+            if rpm -q dnf-automatic &>/dev/null; then
+                if systemctl is-enabled dnf-automatic.timer &>/dev/null; then
+                    auto_update_status="$ok enabled"
+                else
+                    auto_update_status="$warn installed, timer disabled"
+                fi
+            else
+                auto_update_status="$fail dnf-automatic not installed"
+            fi
+        else
+            # CentOS 7
+            if rpm -q yum-cron &>/dev/null; then
+                if systemctl is-active yum-cron &>/dev/null; then
+                    auto_update_status="$ok enabled"
+                else
+                    auto_update_status="$warn installed, service disabled"
+                fi
+            else
+                auto_update_status="$fail yum-cron not installed"
+            fi
         fi
     else
-        auto_update_status="$fail not installed"
+        auto_update_status="$warn unknown OS"
     fi
 fi
 
@@ -1186,7 +1245,7 @@ print_section() {
       print_row "Fail2ban" "$fail2ban_status"
       [ "$SHOW_FAIL2BAN_STATS" = true ] && [ "$fail2ban_banned" -gt 0 ] && print_row "  Banned IPs" "$fail2ban_banned"
       print_row "CrowdSec" "$crowdsec_status"
-      print_row "UFW Firewall" "$ufw_status"
+      print_row "Firewall" "$ufw_status"
       print_row "SSH Port" "$ssh_port_status"
       print_row "Root Login" "$root_login_status"
       print_row "Password Auth" "$password_auth_status"
