@@ -14,7 +14,7 @@ set -euo pipefail  # Exit on error, undefined variable, pipe failure
 # ============================================================================
 # CONSTANTS
 # ============================================================================
-readonly SCRIPT_VERSION="2025.10.06.4"
+readonly SCRIPT_VERSION="2025.10.06.5"
 readonly SCRIPT_NAME="GIG MOTD Dashboard"
 readonly REMOTE_URL="https://dignezzz.github.io/server/dashboard.sh"
 
@@ -631,7 +631,7 @@ cat > "$TMP_FILE" << 'EOF'
 #!/bin/bash
 
 
-CURRENT_VERSION="2025.10.06.4"
+CURRENT_VERSION="2025.10.06.5"
 REMOTE_URL="https://dignezzz.github.io/server/dashboard.sh"
 
 # Проверка обновлений (каждый раз при входе)
