@@ -5,7 +5,7 @@
 # ============================================================================
 # Description: Modern, configurable MOTD dashboard for Linux servers
 # Author: DigneZzZ - https://gig.ovh
-# Version: 2025.10.06.2
+# Version: 2025.10.06.3
 # License: MIT
 # ============================================================================
 
@@ -14,7 +14,7 @@ set -euo pipefail  # Exit on error, undefined variable, pipe failure
 # ============================================================================
 # CONSTANTS
 # ============================================================================
-readonly SCRIPT_VERSION="2025.10.06.2"
+readonly SCRIPT_VERSION="2025.10.06.3"
 readonly SCRIPT_NAME="GIG MOTD Dashboard"
 readonly REMOTE_URL="https://dignezzz.github.io/server/dashboard.sh"
 
@@ -357,6 +357,35 @@ OPTIONS=(
   SHOW_TEMP
 )
 
+# Descriptions for each option
+declare -A DESCRIPTIONS=(
+  ["SHOW_UPTIME"]="System uptime (days, hours)"
+  ["SHOW_LOAD"]="Load average (1m, 5m, 15m)"
+  ["SHOW_CPU"]="CPU usage with progress bar"
+  ["SHOW_RAM"]="RAM usage with progress bar"
+  ["SHOW_SWAP"]="SWAP usage with progress bar"
+  ["SHOW_DISK"]="Root disk (/) usage"
+  ["SHOW_ADDITIONAL_DISKS"]="Additional disks (/home, /var, /data)"
+  ["SHOW_INODES"]="Inodes usage (warns at >80%)"
+  ["SHOW_PROCESSES"]="Running/zombie processes count"
+  ["SHOW_IO_WAIT"]="Disk I/O wait percentage"
+  ["SHOW_NET"]="Network traffic (RX/TX)"
+  ["SHOW_IP"]="Public and local IP addresses"
+  ["SHOW_CONNECTIONS"]="Active network connections (slow)"
+  ["SHOW_LAST_LOGIN"]="Last login info (user, IP, time)"
+  ["SHOW_FAILED_LOGINS"]="Failed SSH login attempts"
+  ["SHOW_DOCKER"]="Docker containers status"
+  ["SHOW_DOCKER_VOLUMES"]="Docker volumes disk usage"
+  ["SHOW_SERVICES"]="Services status (nginx, mysql, etc.)"
+  ["SHOW_SSL_CERTS"]="SSL certificates expiry (warns <30 days)"
+  ["SHOW_SSH"]="SSH port and configuration"
+  ["SHOW_SECURITY"]="Security settings (root login, etc.)"
+  ["SHOW_UPDATES"]="Available system updates"
+  ["SHOW_AUTOUPDATES"]="Auto-updates status"
+  ["SHOW_FAIL2BAN_STATS"]="Fail2ban banned IPs count"
+  ["SHOW_TEMP"]="CPU temperature (if available)"
+)
+
 print_menu() {
   echo "🔧 Настройка GIG MOTD"
   echo "1) Настроить отображаемые блоки"
@@ -409,7 +438,10 @@ configure_blocks() {
       local display_name="${VAR#SHOW_}"
       display_name="${display_name//_/ }"
       
-      printf "%2d) %s %s\n" "$idx" "$symbol" "$display_name"
+      # Get description
+      local desc="${DESCRIPTIONS[$VAR]}"
+      
+      printf "%2d) %s %-20s - %s\n" "$idx" "$symbol" "$display_name" "$desc"
       ((idx++))
     done
     
@@ -599,7 +631,7 @@ cat > "$TMP_FILE" << 'EOF'
 #!/bin/bash
 
 
-CURRENT_VERSION="2025.10.06.2"
+CURRENT_VERSION="2025.10.06.3"
 REMOTE_URL="https://dignezzz.github.io/server/dashboard.sh"
 
 # Проверка обновлений (каждый раз при входе)
