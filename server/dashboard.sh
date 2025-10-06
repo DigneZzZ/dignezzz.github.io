@@ -5,7 +5,7 @@
 # ============================================================================
 # Description: Modern, configurable MOTD dashboard for Linux servers
 # Author: DigneZzZ - https://gig.ovh
-# Version: 2025.10.06.1
+# Version: 2025.10.06.2
 # License: MIT
 # ============================================================================
 
@@ -14,11 +14,11 @@ set -euo pipefail  # Exit on error, undefined variable, pipe failure
 # ============================================================================
 # CONSTANTS
 # ============================================================================
-readonly SCRIPT_VERSION="2025.10.06.1"
+readonly SCRIPT_VERSION="2025.10.06.2"
 readonly SCRIPT_NAME="GIG MOTD Dashboard"
 readonly REMOTE_URL="https://dignezzz.github.io/server/dashboard.sh"
 
-# Default paths (can be overridden by --not-root)
+# Default paths (can be overridden by --not-root and OS detection)
 DASHBOARD_FILE="/etc/update-motd.d/99-dashboard"
 CONFIG_GLOBAL="/etc/motdrc"
 MOTD_CONFIG_TOOL="/usr/local/bin/motd-config"
@@ -30,6 +30,12 @@ MOTD_VIEWER="/usr/local/bin/motd"
 FORCE_MODE=false
 INSTALL_USER_MODE=false
 QUIET_MODE=false
+
+# OS Detection variables
+OS_TYPE=""           # debian, rhel, or unknown
+OS_NAME=""           # Ubuntu, Debian, CentOS, AlmaLinux, etc.
+OS_VERSION=""        # 20.04, 22.04, 10, 11, 12, 7, 8, 9
+PACKAGE_MANAGER=""   # apt, yum, or dnf
 
 # ============================================================================
 # COLOR FUNCTIONS
@@ -79,6 +85,85 @@ error_exit() {
 }
 
 # ============================================================================
+# OS DETECTION
+# ============================================================================
+
+detect_os() {
+    # Detect OS type and version
+    if [ -f /etc/os-release ]; then
+        . /etc/os-release
+        OS_NAME="$NAME"
+        OS_VERSION="${VERSION_ID:-unknown}"
+        
+        case "$ID" in
+            ubuntu|debian)
+                OS_TYPE="debian"
+                PACKAGE_MANAGER="apt"
+                ;;
+            centos|rhel|almalinux|rocky)
+                OS_TYPE="rhel"
+                # CentOS 7 uses yum, CentOS 8+ and AlmaLinux use dnf
+                if _exists dnf; then
+                    PACKAGE_MANAGER="dnf"
+                else
+                    PACKAGE_MANAGER="yum"
+                fi
+                ;;
+            *)
+                OS_TYPE="unknown"
+                PACKAGE_MANAGER="unknown"
+                warning "Unknown OS: $ID. Some features may not work correctly."
+                ;;
+        esac
+    else
+        OS_TYPE="unknown"
+        OS_NAME="Unknown Linux"
+        OS_VERSION="unknown"
+        PACKAGE_MANAGER="unknown"
+        warning "Cannot detect OS. /etc/os-release not found."
+    fi
+    
+    info "Detected: $OS_NAME $OS_VERSION ($OS_TYPE)"
+}
+
+setup_paths_for_os() {
+    # Adjust paths based on OS type
+    if [ "$INSTALL_USER_MODE" = true ]; then
+        # User mode - same for all OS
+        DASHBOARD_FILE="$HOME/.config/gig-motd/dashboard.sh"
+        CONFIG_GLOBAL="$HOME/.motdrc"
+        MOTD_CONFIG_TOOL="$HOME/.local/bin/motd-config"
+        MOTD_VIEWER="$HOME/.local/bin/motd"
+        return
+    fi
+    
+    case "$OS_TYPE" in
+        debian)
+            # Debian/Ubuntu use /etc/update-motd.d/
+            DASHBOARD_FILE="/etc/update-motd.d/99-dashboard"
+            CONFIG_GLOBAL="/etc/motdrc"
+            MOTD_CONFIG_TOOL="/usr/local/bin/motd-config"
+            MOTD_VIEWER="/usr/local/bin/motd"
+            ;;
+        rhel)
+            # CentOS/AlmaLinux use /etc/profile.d/
+            DASHBOARD_FILE="/etc/profile.d/motd.sh"
+            CONFIG_GLOBAL="/etc/motdrc"
+            MOTD_CONFIG_TOOL="/usr/local/bin/motd-config"
+            MOTD_VIEWER="/usr/local/bin/motd"
+            ;;
+        *)
+            # Unknown OS - try /etc/profile.d/ as fallback
+            DASHBOARD_FILE="/etc/profile.d/motd.sh"
+            CONFIG_GLOBAL="/etc/motdrc"
+            MOTD_CONFIG_TOOL="/usr/local/bin/motd-config"
+            MOTD_VIEWER="/usr/local/bin/motd"
+            warning "Using fallback paths for unknown OS"
+            ;;
+    esac
+}
+
+# ============================================================================
 # HELP AND VERSION
 # ============================================================================
 
@@ -88,6 +173,13 @@ $(_bold "$SCRIPT_NAME v$SCRIPT_VERSION")
 
 $(_bold "USAGE:")
     $0 [OPTIONS]
+
+$(_bold "SUPPORTED OS:")
+    ✅ Ubuntu 20.04, 22.04, 24.04
+    ✅ Debian 10, 11, 12
+    ✅ CentOS 7, 8
+    ✅ AlmaLinux 8, 9
+    ✅ Rocky Linux 8, 9
 
 $(_bold "OPTIONS:")
     --force         Skip confirmation prompts
@@ -105,9 +197,11 @@ $(_bold "POST-INSTALLATION:")
     motd                  - View MOTD dashboard anytime
     motd --update         - Update to latest version
     motd --check-update   - Force check for updates
-    motd-config           - Configure dashboard settings
+    motd-config           - Interactive configuration menu
 
 $(_bold "FEATURES:")
+    ✅ Multi-distro support: Debian, Ubuntu, CentOS, AlmaLinux, Rocky
+    ✅ Interactive configuration with toggle switches [✓] / [ ]
     ✅ Progress bars for CPU, RAM, SWAP, Disk with color indicators
     ✅ System metrics: processes, zombie detection, I/O wait
     ✅ Network: traffic stats, IP addresses
@@ -160,12 +254,22 @@ parse_arguments() {
     done
 }
 
+# ============================================================================
+# INITIALIZATION
+# ============================================================================
 
+# Detect OS and setup paths
+detect_os
+setup_paths_for_os
+
+# Create directories if needed
 if [ "$INSTALL_USER_MODE" = true ]; then
-    DASHBOARD_FILE="$HOME/.config/gig-motd/99-dashboard"
-    MOTD_CONFIG_TOOL="$HOME/.local/bin/motd-config"
-    CONFIG_GLOBAL="$HOME/.motdrc"
     mkdir -p "$(dirname "$DASHBOARD_FILE")" "$(dirname "$MOTD_CONFIG_TOOL")"
+else
+    # For RHEL-based systems, ensure /etc/profile.d exists
+    if [ "$OS_TYPE" = "rhel" ]; then
+        mkdir -p /etc/profile.d
+    fi
 fi
 
 
@@ -261,16 +365,102 @@ print_menu() {
 }
 
 configure_blocks() {
-  echo "Выбери блоки для отображения (y/n):"
+  # Load current settings
+  declare -A settings
+  
+  # Set defaults
   for VAR in "${OPTIONS[@]}"; do
-    read -p "$VAR (y/n) [Y]: " val
-    case "${val,,}" in
-      y|"") echo "$VAR=true" ;;
-      n)    echo "$VAR=false" ;;
-      *)    echo "$VAR=true" ;;
+    settings[$VAR]="true"
+  done
+  
+  # Load existing config if present
+  if [ -f "$TARGET_FILE" ]; then
+    while IFS='=' read -r key value; do
+      key=$(echo "$key" | xargs)  # trim whitespace
+      value=$(echo "$value" | xargs)
+      if [[ -n "$key" && "$key" != \#* ]]; then
+        settings[$key]="$value"
+      fi
+    done < "$TARGET_FILE"
+  fi
+  
+  # Interactive menu loop
+  while true; do
+    clear
+    echo "=============================================================="
+    echo "🔧 Настройка GIG MOTD Dashboard"
+    echo "=============================================================="
+    echo ""
+    echo "Выбери номер пункта для переключения (✓/✗):"
+    echo ""
+    
+    local idx=1
+    for VAR in "${OPTIONS[@]}"; do
+      local status="${settings[$VAR]:-true}"
+      local symbol
+      
+      if [ "$status" = "true" ]; then
+        symbol="[✓]"
+      else
+        symbol="[ ]"
+      fi
+      
+      # Format option name for display
+      local display_name="${VAR#SHOW_}"
+      display_name="${display_name//_/ }"
+      
+      printf "%2d) %s %s\n" "$idx" "$symbol" "$display_name"
+      ((idx++))
+    done
+    
+    echo ""
+    echo "=============================================================="
+    echo " s) Сохранить и выйти"
+    echo " 0) Выйти без сохранения"
+    echo "=============================================================="
+    echo ""
+    read -p "Выбор: " choice
+    
+    case "$choice" in
+      s|S)
+        # Save settings
+        {
+          echo "# GIG MOTD Dashboard Configuration"
+          echo "# Generated: $(date '+%Y-%m-%d %H:%M:%S')"
+          echo ""
+          for VAR in "${OPTIONS[@]}"; do
+            echo "$VAR=${settings[$VAR]}"
+          done
+        } > "$TARGET_FILE"
+        echo ""
+        echo "✅ Настройки сохранены в $TARGET_FILE"
+        sleep 1
+        return 0
+        ;;
+      0)
+        echo "❌ Выход без сохранения"
+        sleep 1
+        return 1
+        ;;
+      ''|*[!0-9]*)
+        # Invalid input
+        continue
+        ;;
+      *)
+        # Toggle option
+        if [ "$choice" -ge 1 ] && [ "$choice" -le "${#OPTIONS[@]}" ]; then
+          local var_idx=$((choice - 1))
+          local var_name="${OPTIONS[$var_idx]}"
+          
+          if [ "${settings[$var_name]}" = "true" ]; then
+            settings[$var_name]="false"
+          else
+            settings[$var_name]="true"
+          fi
+        fi
+        ;;
     esac
-  done > "$TARGET_FILE"
-  echo "✅ Настройки сохранены в $TARGET_FILE"
+  done
 }
 
 uninstall_dashboard() {
@@ -370,6 +560,13 @@ EOF
     fi
 }
 
+# ============================================================================
+# MAIN EXECUTION
+# ============================================================================
+
+# Parse command line arguments
+parse_arguments "$@"
+
 # === Проверка прав ===
 if [ "$EUID" -ne 0 ] && [ "$INSTALL_USER_MODE" = false ]; then
     echo "❌ Пожалуйста, запусти от root или с флагом --not-root"
@@ -402,7 +599,7 @@ cat > "$TMP_FILE" << 'EOF'
 #!/bin/bash
 
 
-CURRENT_VERSION="2025.10.06.1"
+CURRENT_VERSION="2025.10.06.2"
 REMOTE_URL="https://dignezzz.github.io/server/dashboard.sh"
 
 # Проверка обновлений (каждый раз при входе)
@@ -962,15 +1159,19 @@ if [ "$FORCE_MODE" = true ]; then
     mv "$TMP_FILE" "$DASHBOARD_FILE"
 if [ "$INSTALL_USER_MODE" = false ]; then
     chmod +x "$DASHBOARD_FILE"
-    # Отключение стандартного MOTD Ubuntu
-    chmod -x /etc/update-motd.d/00-header 2>/dev/null || true
-    chmod -x /etc/update-motd.d/10-help-text 2>/dev/null || true
-    chmod -x /etc/update-motd.d/50-landscape-sysinfo 2>/dev/null || true
-    chmod -x /etc/update-motd.d/50-motd-news 2>/dev/null || true
-    chmod -x /etc/update-motd.d/80-livepatch 2>/dev/null || true
-    chmod -x /etc/update-motd.d/90-updates-available 2>/dev/null || true
-    chmod -x /etc/update-motd.d/91-release-upgrade 2>/dev/null || true
-    chmod -x /etc/update-motd.d/95-hwe-eol 2>/dev/null || true
+    
+    # Отключение стандартного MOTD только для Debian/Ubuntu
+    if [ "$OS_TYPE" = "debian" ]; then
+        info "Отключение стандартных скриптов Ubuntu MOTD..."
+        chmod -x /etc/update-motd.d/00-header 2>/dev/null || true
+        chmod -x /etc/update-motd.d/10-help-text 2>/dev/null || true
+        chmod -x /etc/update-motd.d/50-landscape-sysinfo 2>/dev/null || true
+        chmod -x /etc/update-motd.d/50-motd-news 2>/dev/null || true
+        chmod -x /etc/update-motd.d/80-livepatch 2>/dev/null || true
+        chmod -x /etc/update-motd.d/90-updates-available 2>/dev/null || true
+        chmod -x /etc/update-motd.d/91-release-upgrade 2>/dev/null || true
+        chmod -x /etc/update-motd.d/95-hwe-eol 2>/dev/null || true
+    fi
 fi
     install_motd_viewer
     install_motd_config
@@ -990,21 +1191,27 @@ else
     echo "👉 Будет установлена команда: $MOTD_VIEWER"
     echo "👉 Будет установлена CLI утилита: $MOTD_CONFIG_TOOL"
     echo "👉 Будет создан глобальный конфиг: $CONFIG_GLOBAL"
-    echo "👉 Будут отключены все стандартные скрипты Ubuntu MOTD"
+    if [ "$OS_TYPE" = "debian" ]; then
+        echo "👉 Будут отключены все стандартные скрипты Ubuntu/Debian MOTD"
+    fi
     read -p '❓ Установить этот MOTD-дэшборд? [y/N]: ' confirm
     if [[ "$confirm" =~ ^[Yy]$ ]]; then
         mv "$TMP_FILE" "$DASHBOARD_FILE"
 if [ "$INSTALL_USER_MODE" = false ]; then
     chmod +x "$DASHBOARD_FILE"
-    # Отключение стандартного MOTD Ubuntu
-    chmod -x /etc/update-motd.d/00-header 2>/dev/null || true
-    chmod -x /etc/update-motd.d/10-help-text 2>/dev/null || true
-    chmod -x /etc/update-motd.d/50-landscape-sysinfo 2>/dev/null || true
-    chmod -x /etc/update-motd.d/50-motd-news 2>/dev/null || true
-    chmod -x /etc/update-motd.d/80-livepatch 2>/dev/null || true
-    chmod -x /etc/update-motd.d/90-updates-available 2>/dev/null || true
-    chmod -x /etc/update-motd.d/91-release-upgrade 2>/dev/null || true
-    chmod -x /etc/update-motd.d/95-hwe-eol 2>/dev/null || true
+    
+    # Отключение стандартного MOTD только для Debian/Ubuntu
+    if [ "$OS_TYPE" = "debian" ]; then
+        info "Отключение стандартных скриптов Ubuntu/Debian MOTD..."
+        chmod -x /etc/update-motd.d/00-header 2>/dev/null || true
+        chmod -x /etc/update-motd.d/10-help-text 2>/dev/null || true
+        chmod -x /etc/update-motd.d/50-landscape-sysinfo 2>/dev/null || true
+        chmod -x /etc/update-motd.d/50-motd-news 2>/dev/null || true
+        chmod -x /etc/update-motd.d/80-livepatch 2>/dev/null || true
+        chmod -x /etc/update-motd.d/90-updates-available 2>/dev/null || true
+        chmod -x /etc/update-motd.d/91-release-upgrade 2>/dev/null || true
+        chmod -x /etc/update-motd.d/95-hwe-eol 2>/dev/null || true
+    fi
 fi
     install_motd_viewer
     install_motd_config
