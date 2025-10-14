@@ -1431,7 +1431,17 @@ function update_fail2ban_ssh_port() {
 
 function backup_and_configure_fail2ban() {
   JAIL_LOCAL="/etc/fail2ban/jail.local"
-  cp -f "$JAIL_LOCAL" "${JAIL_LOCAL}.bak_$(date +%Y%m%d_%H%M%S)" 2>/dev/null
+  
+  # Создаем директорию fail2ban если её нет
+  if [ ! -d "/etc/fail2ban" ]; then
+    mkdir -p /etc/fail2ban
+    echo -e "${YELLOW}Created /etc/fail2ban directory${NC}"
+  fi
+  
+  # Создаем резервную копию если файл существует
+  if [ -f "$JAIL_LOCAL" ]; then
+    cp -f "$JAIL_LOCAL" "${JAIL_LOCAL}.bak_$(date +%Y%m%d_%H%M%S)" 2>/dev/null
+  fi
 
   # Получаем правильный путь к SSH логам
   local ssh_log_path=$(get_ssh_log_path)
@@ -1458,13 +1468,32 @@ EOF
 }
 
 function restart_fail2ban() {
+  # Сначала включаем службу в systemd если она не включена
+  if ! systemctl is-enabled --quiet fail2ban 2>/dev/null; then
+    systemctl enable fail2ban 2>/dev/null
+    echo -e "${YELLOW}Enabling Fail2ban service in systemd...${NC}"
+  fi
+  
+  # Перезапускаем службу
   systemctl restart fail2ban
-  sleep 1
+  sleep 2
+  
+  # Проверяем статус
   if systemctl is-active --quiet fail2ban; then
     echo -e "${GREEN}Fail2ban service is running.${NC}"
   else
     echo -e "${RED}Fail2ban failed to start. Check the config!${NC}"
-    fail2ban-client -d
+    
+    # Показываем более подробную информацию об ошибке
+    echo -e "${YELLOW}Checking Fail2ban status...${NC}"
+    systemctl status fail2ban --no-pager || true
+    
+    # Пробуем показать детали конфигурации
+    if command -v fail2ban-client &>/dev/null; then
+      echo -e "${YELLOW}Testing Fail2ban configuration...${NC}"
+      fail2ban-client -d || true
+    fi
+    
     exit 1
   fi
 }
@@ -1725,7 +1754,7 @@ case "$1" in
       echo ""
       
       # Проверяем, установлен ли уже Fail2ban
-      local is_update=false
+      is_update=false
       if command -v fail2ban-server &>/dev/null; then
         echo -e "${GREEN}${ICON_CHECK} Fail2ban уже установлен${NC}"
         is_update=true
