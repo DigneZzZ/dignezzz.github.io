@@ -14,7 +14,7 @@ set -euo pipefail  # Exit on error, undefined variable, pipe failure
 # ============================================================================
 # CONSTANTS
 # ============================================================================
-readonly SCRIPT_VERSION="2025.10.06.6"
+readonly SCRIPT_VERSION="2025.10.28.1"
 readonly SCRIPT_NAME="GIG MOTD Dashboard"
 readonly REMOTE_URL="https://dignezzz.github.io/server/dashboard.sh"
 
@@ -631,7 +631,7 @@ cat > "$TMP_FILE" << 'EOF'
 #!/bin/bash
 
 
-CURRENT_VERSION="2025.10.06.6"
+CURRENT_VERSION="2025.10.28.1"
 REMOTE_URL="https://dignezzz.github.io/server/dashboard.sh"
 
 # Проверка обновлений (каждый раз при входе)
@@ -824,8 +824,20 @@ fi
 
 # Fail2ban статистика
 fail2ban_banned=0
+fail2ban_installed=false
 if command -v fail2ban-client &>/dev/null; then
+    fail2ban_installed=true
     fail2ban_banned=$(fail2ban-client status 2>/dev/null | grep "Jail list" | sed 's/.*://;s/,//g' | xargs -n1 fail2ban-client status 2>/dev/null | grep "Currently banned" | awk '{s+=$NF} END {print s+0}')
+fi
+
+# CrowdSec статистика
+crowdsec_banned=0
+crowdsec_installed=false
+if command -v cscli &>/dev/null; then
+    crowdsec_installed=true
+    crowdsec_banned=$(cscli decisions list -o raw 2>/dev/null | wc -l)
+    # Вычитаем 1 если есть заголовок
+    [ "$crowdsec_banned" -gt 0 ] && crowdsec_banned=$((crowdsec_banned - 1))
 fi
 
 # === НОВЫЕ МЕТРИКИ ===
@@ -1021,12 +1033,31 @@ if [ "$SHOW_SSH" = true ] || [ "$SHOW_SECURITY" = true ]; then
     ssh_ips=$(who | awk '{print $5}' | tr -d '()' | sort | uniq | paste -sd ', ' -)
 fi
 
-# Fail2ban (только если включено)
+# Fail2ban и CrowdSec статус (только если включено)
 if [ "$SHOW_FAIL2BAN_STATS" = true ]; then
-    if command -v fail2ban-client &>/dev/null; then
-        fail2ban_status="$ok active"
+    # Формируем единую строку статуса
+    ban_systems_status=""
+    
+    # Fail2ban
+    if [ "$fail2ban_installed" = true ]; then
+        if systemctl is-active fail2ban &>/dev/null; then
+            ban_systems_status="$ok Fail2ban"
+        else
+            ban_systems_status="$warn Fail2ban (inactive)"
+        fi
     else
-        fail2ban_status="$fail not installed"
+        ban_systems_status="$fail Fail2ban"
+    fi
+    
+    # CrowdSec
+    if [ "$crowdsec_installed" = true ]; then
+        if systemctl is-active crowdsec &>/dev/null; then
+            ban_systems_status="${ban_systems_status} | $ok CrowdSec"
+        else
+            ban_systems_status="${ban_systems_status} | $warn CrowdSec (inactive)"
+        fi
+    else
+        ban_systems_status="${ban_systems_status} | $fail CrowdSec"
     fi
 fi
 
@@ -1067,14 +1098,8 @@ if [ "$SHOW_SECURITY" = true ]; then
     fi
 fi
 
-# Security блок - CrowdSec, SSH, Root login, Password auth (только если включено)
+# Security блок - SSH, Root login, Password auth (только если включено)
 if [ "$SHOW_SECURITY" = true ]; then
-    if systemctl is-active crowdsec &>/dev/null; then
-        crowdsec_status="$ok active"
-    else
-        crowdsec_status="$fail not running"
-    fi
-
     ssh_port=$(grep -Ei '^Port ' /etc/ssh/sshd_config | awk '{print $2}' | head -n1)
     [ -z "$ssh_port" ] && ssh_port=22
     [ "$ssh_port" != "22" ] && ssh_port_status="$ok non-standard port ($ssh_port)" || ssh_port_status="$warn default port (22)"
@@ -1289,9 +1314,21 @@ print_section() {
       ;;
     ssh_block)
       echo " ~~~~~~ ↓↓↓ Security Block ↓↓↓ ~~~~~~"
-      print_row "Fail2ban" "$fail2ban_status"
-      [ "$SHOW_FAIL2BAN_STATS" = true ] && [ "$fail2ban_banned" -gt 0 ] && print_row "  Banned IPs" "$fail2ban_banned"
-      print_row "CrowdSec" "$crowdsec_status"
+      print_row "Ban Systems" "$ban_systems_status"
+      
+      # Показываем статистику блокировок если есть
+      if [ "$SHOW_FAIL2BAN_STATS" = true ]; then
+        local ban_stats=""
+        if [ "$fail2ban_banned" -gt 0 ]; then
+          ban_stats="F2B: $fail2ban_banned"
+        fi
+        if [ "$crowdsec_banned" -gt 0 ]; then
+          [ -n "$ban_stats" ] && ban_stats="$ban_stats | "
+          ban_stats="${ban_stats}CrowdSec: $crowdsec_banned"
+        fi
+        [ -n "$ban_stats" ] && print_row "  Banned IPs" "$ban_stats"
+      fi
+      
       print_row "Firewall" "$ufw_status"
       print_row "SSH Port" "$ssh_port_status"
       print_row "Root Login" "$root_login_status"
