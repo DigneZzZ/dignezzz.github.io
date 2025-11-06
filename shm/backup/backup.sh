@@ -81,124 +81,64 @@ check_os_compatibility() {
     fi
 }
 
-# Install Docker automatically
-install_docker() {
-    echo -e "${YELLOW}Installing Docker...${NC}"
-    
-    case $OS in
-        debian|ubuntu)
-            sudo apt-get update
-            sudo apt-get install -y ca-certificates curl gnupg lsb-release
-            
-            # Add Docker's official GPG key
-            sudo install -m 0755 -d /etc/apt/keyrings
-            curl -fsSL https://download.docker.com/linux/$OS/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
-            sudo chmod a+r /etc/apt/keyrings/docker.gpg
-            
-            # Add Docker repository
-            echo \
-              "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/$OS \
-              $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | \
-              sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
-            
-            # Install Docker
-            sudo apt-get update
-            sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-            ;;
-            
-        centos|rhel|almalinux|rocky|fedora)
-            sudo yum install -y yum-utils 2>/dev/null || sudo dnf install -y yum-utils
-            sudo yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo 2>/dev/null || \
-                sudo dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
-            
-            sudo yum install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin 2>/dev/null || \
-                sudo dnf install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-            ;;
-            
-        *)
-            echo -e "${RED}✖ Cannot auto-install Docker on $OS_NAME${NC}"
-            echo -e "${YELLOW}Please install Docker manually: https://docs.docker.com/engine/install/${NC}"
-            return 1
-            ;;
-    esac
-    
-    # Start and enable Docker
-    sudo systemctl start docker
-    sudo systemctl enable docker
-    
-    # Add current user to docker group
-    if ! groups | grep -q docker; then
-        sudo usermod -aG docker "$USER"
-        echo -e "${YELLOW}⚠ User added to docker group. Please log out and log back in for this to take effect.${NC}"
-        echo -e "${YELLOW}⚠ Or run: newgrp docker${NC}"
-    fi
-    
-    echo -e "${GREEN}✔ Docker installed successfully${NC}"
-}
-
 # Check and install required dependencies
 check_dependencies() {
     local missing_deps=()
-    local docker_missing=false
     
     # Required commands
     local required_cmds=("docker" "curl" "tar" "grep" "sed")
     
     for cmd in "${required_cmds[@]}"; do
         if ! command -v "$cmd" &> /dev/null; then
-            if [ "$cmd" = "docker" ]; then
-                docker_missing=true
-            else
-                missing_deps+=("$cmd")
-            fi
+            missing_deps+=("$cmd")
         fi
     done
     
     # Handle missing dependencies
-    if [ "$docker_missing" = true ] || [ ${#missing_deps[@]} -gt 0 ]; then
+    if [ ${#missing_deps[@]} -gt 0 ]; then
         echo -e "${RED}✖ Missing required dependencies:${NC}"
-        [ "$docker_missing" = true ] && echo -e "  ${YELLOW}- docker${NC}"
         for dep in "${missing_deps[@]}"; do
             echo -e "  ${YELLOW}- $dep${NC}"
         done
         echo
         
-        # Ask for automatic installation
-        echo -ne "${YELLOW}Do you want to install missing dependencies automatically? (Y/n):${NC} "
+        # Check if Docker is missing
+        if [[ " ${missing_deps[*]} " =~ " docker " ]]; then
+            echo -e "${RED}✖ Docker is required but not found!${NC}"
+            echo -e "${YELLOW}SHM requires Docker to run. Please install Docker first:${NC}"
+            echo -e "  ${BLUE}curl -fsSL https://get.docker.com | sh${NC}"
+            echo
+            exit 1
+        fi
+        
+        # Ask for automatic installation of other packages
+        echo -ne "${YELLOW}Install missing packages automatically? (Y/n):${NC} "
         read -r confirm
         confirm=${confirm:-Y}
         
         if [[ ! "$confirm" =~ ^[Nn]$ ]]; then
-            # Install Docker separately if missing
-            if [ "$docker_missing" = true ]; then
-                install_docker || exit 1
-            fi
+            echo -e "${YELLOW}Installing packages: ${missing_deps[*]}${NC}"
             
-            # Install other packages
-            if [ ${#missing_deps[@]} -gt 0 ]; then
-                echo -e "${YELLOW}Installing packages: ${missing_deps[*]}${NC}"
-                
-                case $OS in
-                    debian|ubuntu)
-                        sudo apt-get update
-                        sudo apt-get install -y "${missing_deps[@]}"
-                        ;;
-                    centos|rhel|almalinux|rocky|fedora)
-                        if command -v dnf &> /dev/null; then
-                            sudo dnf install -y "${missing_deps[@]}"
-                        else
-                            sudo yum install -y "${missing_deps[@]}"
-                        fi
-                        ;;
-                    *)
-                        echo -e "${RED}✖ Cannot auto-install on $OS_NAME${NC}"
-                        echo -e "${YELLOW}Please install manually: ${missing_deps[*]}${NC}"
-                        exit 1
-                        ;;
-                esac
-                
-                echo -e "${GREEN}✔ Packages installed successfully${NC}"
-            fi
+            case $OS in
+                debian|ubuntu)
+                    sudo apt-get update
+                    sudo apt-get install -y "${missing_deps[@]}"
+                    ;;
+                centos|rhel|almalinux|rocky|fedora)
+                    if command -v dnf &> /dev/null; then
+                        sudo dnf install -y "${missing_deps[@]}"
+                    else
+                        sudo yum install -y "${missing_deps[@]}"
+                    fi
+                    ;;
+                *)
+                    echo -e "${RED}✖ Cannot auto-install on $OS_NAME${NC}"
+                    echo -e "${YELLOW}Please install manually: ${missing_deps[*]}${NC}"
+                    exit 1
+                    ;;
+            esac
+            
+            echo -e "${GREEN}✔ Packages installed successfully${NC}"
         else
             echo -e "${RED}Installation cancelled. Please install dependencies manually.${NC}"
             exit 1
