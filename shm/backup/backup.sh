@@ -8,6 +8,212 @@ readonly YELLOW='\033[1;33m'
 readonly BLUE='\033[0;34m'
 readonly NC='\033[0m'
 
+# Detect OS and version
+detect_os() {
+    if [ -f /etc/os-release ]; then
+        . /etc/os-release
+        OS=$ID
+        OS_VERSION=$VERSION_ID
+        OS_NAME=$PRETTY_NAME
+    elif [ -f /etc/redhat-release ]; then
+        OS="rhel"
+        OS_VERSION=$(cat /etc/redhat-release | grep -oE '[0-9]+\.[0-9]+' | head -1)
+        OS_NAME=$(cat /etc/redhat-release)
+    else
+        OS="unknown"
+        OS_VERSION="unknown"
+        OS_NAME="Unknown OS"
+    fi
+}
+
+# Check OS compatibility
+check_os_compatibility() {
+    detect_os
+    
+    local compatible=false
+    local os_info=""
+    
+    case $OS in
+        debian)
+            if [[ "$OS_VERSION" =~ ^(11|12|13) ]]; then
+                compatible=true
+                os_info="Debian $OS_VERSION"
+            fi
+            ;;
+        ubuntu)
+            if [[ "$OS_VERSION" =~ ^(20|22|24) ]]; then
+                compatible=true
+                os_info="Ubuntu $OS_VERSION"
+            fi
+            ;;
+        centos|rhel)
+            if [[ "$OS_VERSION" =~ ^[7-9] ]]; then
+                compatible=true
+                os_info="CentOS/RHEL $OS_VERSION"
+            fi
+            ;;
+        almalinux|rocky)
+            if [[ "$OS_VERSION" =~ ^[8-9] ]]; then
+                compatible=true
+                os_info="AlmaLinux/Rocky $OS_VERSION"
+            fi
+            ;;
+        fedora)
+            compatible=true
+            os_info="Fedora $OS_VERSION"
+            ;;
+    esac
+    
+    if [ "$compatible" = true ]; then
+        echo -e "${GREEN}✔ OS Detected:${NC} $os_info"
+        return 0
+    else
+        echo -e "${YELLOW}⚠ Warning: OS not officially tested${NC}"
+        echo -e "${BLUE}Detected:${NC} $OS_NAME"
+        echo -e "${BLUE}The script should work on any Linux with Docker and bash 4+${NC}"
+        echo
+        echo -ne "${YELLOW}Continue anyway? (y/N):${NC} "
+        read -r confirm
+        if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+            echo -e "${RED}Installation cancelled.${NC}"
+            exit 1
+        fi
+    fi
+}
+
+# Install Docker automatically
+install_docker() {
+    echo -e "${YELLOW}Installing Docker...${NC}"
+    
+    case $OS in
+        debian|ubuntu)
+            sudo apt-get update
+            sudo apt-get install -y ca-certificates curl gnupg lsb-release
+            
+            # Add Docker's official GPG key
+            sudo install -m 0755 -d /etc/apt/keyrings
+            curl -fsSL https://download.docker.com/linux/$OS/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+            sudo chmod a+r /etc/apt/keyrings/docker.gpg
+            
+            # Add Docker repository
+            echo \
+              "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/$OS \
+              $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | \
+              sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+            
+            # Install Docker
+            sudo apt-get update
+            sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+            ;;
+            
+        centos|rhel|almalinux|rocky|fedora)
+            sudo yum install -y yum-utils 2>/dev/null || sudo dnf install -y yum-utils
+            sudo yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo 2>/dev/null || \
+                sudo dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
+            
+            sudo yum install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin 2>/dev/null || \
+                sudo dnf install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+            ;;
+            
+        *)
+            echo -e "${RED}✖ Cannot auto-install Docker on $OS_NAME${NC}"
+            echo -e "${YELLOW}Please install Docker manually: https://docs.docker.com/engine/install/${NC}"
+            return 1
+            ;;
+    esac
+    
+    # Start and enable Docker
+    sudo systemctl start docker
+    sudo systemctl enable docker
+    
+    # Add current user to docker group
+    if ! groups | grep -q docker; then
+        sudo usermod -aG docker "$USER"
+        echo -e "${YELLOW}⚠ User added to docker group. Please log out and log back in for this to take effect.${NC}"
+        echo -e "${YELLOW}⚠ Or run: newgrp docker${NC}"
+    fi
+    
+    echo -e "${GREEN}✔ Docker installed successfully${NC}"
+}
+
+# Check and install required dependencies
+check_dependencies() {
+    local missing_deps=()
+    local docker_missing=false
+    
+    # Required commands
+    local required_cmds=("docker" "curl" "tar" "grep" "sed")
+    
+    for cmd in "${required_cmds[@]}"; do
+        if ! command -v "$cmd" &> /dev/null; then
+            if [ "$cmd" = "docker" ]; then
+                docker_missing=true
+            else
+                missing_deps+=("$cmd")
+            fi
+        fi
+    done
+    
+    # Handle missing dependencies
+    if [ "$docker_missing" = true ] || [ ${#missing_deps[@]} -gt 0 ]; then
+        echo -e "${RED}✖ Missing required dependencies:${NC}"
+        [ "$docker_missing" = true ] && echo -e "  ${YELLOW}- docker${NC}"
+        for dep in "${missing_deps[@]}"; do
+            echo -e "  ${YELLOW}- $dep${NC}"
+        done
+        echo
+        
+        # Ask for automatic installation
+        echo -ne "${YELLOW}Do you want to install missing dependencies automatically? (Y/n):${NC} "
+        read -r confirm
+        confirm=${confirm:-Y}
+        
+        if [[ ! "$confirm" =~ ^[Nn]$ ]]; then
+            # Install Docker separately if missing
+            if [ "$docker_missing" = true ]; then
+                install_docker || exit 1
+            fi
+            
+            # Install other packages
+            if [ ${#missing_deps[@]} -gt 0 ]; then
+                echo -e "${YELLOW}Installing packages: ${missing_deps[*]}${NC}"
+                
+                case $OS in
+                    debian|ubuntu)
+                        sudo apt-get update
+                        sudo apt-get install -y "${missing_deps[@]}"
+                        ;;
+                    centos|rhel|almalinux|rocky|fedora)
+                        if command -v dnf &> /dev/null; then
+                            sudo dnf install -y "${missing_deps[@]}"
+                        else
+                            sudo yum install -y "${missing_deps[@]}"
+                        fi
+                        ;;
+                    *)
+                        echo -e "${RED}✖ Cannot auto-install on $OS_NAME${NC}"
+                        echo -e "${YELLOW}Please install manually: ${missing_deps[*]}${NC}"
+                        exit 1
+                        ;;
+                esac
+                
+                echo -e "${GREEN}✔ Packages installed successfully${NC}"
+            fi
+        else
+            echo -e "${RED}Installation cancelled. Please install dependencies manually.${NC}"
+            exit 1
+        fi
+    fi
+    
+    # Check bash version
+    if [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
+        echo -e "${RED}✖ Bash 4.0+ required (current: $BASH_VERSION)${NC}"
+        exit 1
+    fi
+    
+    echo -e "${GREEN}✔ All dependencies satisfied${NC}"
+}
+
 # Print formatted messages
 print_header() {
     echo -e "${GREEN}====================================================${NC}"
@@ -41,6 +247,11 @@ prompt_input() {
     read -r input
     eval "$var_name=\"${input:-$default}\""
 }
+
+# Check system compatibility and dependencies
+check_os_compatibility
+check_dependencies
+echo
 
 print_header "Welcome to SHM Backup Installer"
 print_info "This script will create a ${YELLOW}backup.sh${NC} file with your settings.\n"
@@ -509,11 +720,94 @@ generate_telegram_section "$BACKUP_SCRIPT"
 
 chmod +x "$BACKUP_SCRIPT"
 
-print_header "Backup script created successfully!"
+# Setup automatic backups via crontab
+setup_crontab() {
+    echo
+    print_header "Automatic Backup Schedule Setup"
+    echo -e "${YELLOW}Would you like to set up automatic backups?${NC}\n"
+    echo -e "${BLUE}  1) Every 1 hour${NC}"
+    echo -e "${BLUE}  2) Every 2 hours${NC}"
+    echo -e "${BLUE}  3) Every 3 hours${NC}"
+    echo -e "${BLUE}  4) Every 4 hours${NC}"
+    echo -e "${BLUE}  5) Every 6 hours${NC}"
+    echo -e "${BLUE}  6) Every 12 hours${NC}"
+    echo -e "${BLUE}  7) Once a day (at 03:00)${NC}"
+    echo -e "${BLUE}  8) Twice a day (at 03:00 and 15:00)${NC}"
+    echo -e "${BLUE}  9) Skip (configure manually later)${NC}"
+    echo
+    echo -ne "Choose an option (1-9) [7]: "
+    read -r choice
+    choice=${choice:-7}
+    
+    local cron_schedule=""
+    local description=""
+    
+    case $choice in
+        1) cron_schedule="0 * * * *"; description="every hour" ;;
+        2) cron_schedule="0 */2 * * *"; description="every 2 hours" ;;
+        3) cron_schedule="0 */3 * * *"; description="every 3 hours" ;;
+        4) cron_schedule="0 */4 * * *"; description="every 4 hours" ;;
+        5) cron_schedule="0 */6 * * *"; description="every 6 hours" ;;
+        6) cron_schedule="0 */12 * * *"; description="every 12 hours" ;;
+        7) cron_schedule="0 3 * * *"; description="once a day at 03:00" ;;
+        8) cron_schedule="0 3,15 * * *"; description="twice a day (03:00 and 15:00)" ;;
+        9) 
+            echo
+            print_warning "Skipping automatic setup."
+            print_info "To configure manually later, run: ${YELLOW}crontab -e${NC}"
+            print_info "Example: ${YELLOW}0 */6 * * * $BACKUP_SCRIPT${NC}"
+            return 0
+            ;;
+        *) 
+            print_error "Invalid choice. Skipping automatic setup."
+            return 1
+            ;;
+    esac
+    
+    # Check if cron job already exists
+    local existing_cron=$(crontab -l 2>/dev/null | grep -F "$BACKUP_SCRIPT" || true)
+    
+    if [ -n "$existing_cron" ]; then
+        echo
+        print_warning "Found existing cron job for this backup script:"
+        echo -e "  ${YELLOW}$existing_cron${NC}"
+        echo
+        echo -ne "${YELLOW}Replace it with new schedule? (y/N):${NC} "
+        read -r replace
+        if [[ ! "$replace" =~ ^[Yy]$ ]]; then
+            print_info "Keeping existing cron job."
+            return 0
+        fi
+        # Remove old cron job
+        crontab -l 2>/dev/null | grep -vF "$BACKUP_SCRIPT" | crontab - 2>/dev/null || true
+    fi
+    
+    # Add new cron job
+    (crontab -l 2>/dev/null || true; echo "$cron_schedule $BACKUP_SCRIPT # SHM Backup") | crontab -
+    
+    if [ $? -eq 0 ]; then
+        echo
+        print_success "Cron job added successfully!"
+        echo -e "${BLUE}📅 Schedule:${NC} ${GREEN}$description${NC}"
+        echo -e "${BLUE}⏰ Cron:${NC}     ${YELLOW}$cron_schedule${NC}"
+        echo
+        print_info "Useful commands:"
+        echo -e "  ${YELLOW}crontab -l${NC}  # View all cron jobs"
+        echo -e "  ${YELLOW}crontab -e${NC}  # Edit cron jobs"
+    else
+        echo
+        print_error "Failed to add cron job. You can add it manually:"
+        print_info "Run: ${YELLOW}crontab -e${NC}"
+        print_info "Add: ${YELLOW}$cron_schedule $BACKUP_SCRIPT${NC}"
+    fi
+}
+
+setup_crontab
+
+echo
+print_header "Installation Complete!"
 print_info "Script location: ${YELLOW}$BACKUP_SCRIPT${NC}\n"
-print_info "To run it manually, use:"
+print_info "To run backup manually:"
 echo -e "  ${YELLOW}$BACKUP_SCRIPT${NC}\n"
-print_info "To schedule automatic backups, add to crontab (${YELLOW}crontab -e${NC}):"
-echo -e "  ${YELLOW}0 */2 * * * $BACKUP_SCRIPT${NC}  # Every 2 hours"
-echo -e "  ${YELLOW}0 0 * * * $BACKUP_SCRIPT${NC}    # Daily at midnight"
-echo -e "  ${YELLOW}0 */6 * * * $BACKUP_SCRIPT${NC}  # Every 6 hours"
+print_info "To test the backup right now:"
+echo -e "  ${YELLOW}$BACKUP_SCRIPT${NC} ${GREEN}# Run this to verify everything works${NC}"
