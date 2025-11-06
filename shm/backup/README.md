@@ -1,6 +1,258 @@
-# SHM Backup
+# SHM Backup Script Generator
 
-Скрипт для автоматического резервного копирования файлов и базы данных MySQL из SHM с отправкой архива в Telegram.
+Удобный и безопасный скрипт для автоматического создания резервных копий SHM (Server Hosting Manager) с отправкой в Telegram.
+
+## 🎯 Основные возможности
+
+- ✅ **Автоматическое резервное копирование MySQL базы данных**
+- ✅ **Резервное копирование Docker volume (WebDAV данные)**
+- ✅ **Выборочное или полное копирование файлов**
+- ✅ **Автоматическая отправка в Telegram**
+- ✅ **Разделение больших архивов (>49MB)**
+- ✅ **HTML-форматированные уведомления**
+- ✅ **Детальная информация о резервной копии**
+
+## 📋 Что включается в резервную копию
+
+### Всегда:
+- 💾 MySQL база данных (`db_backup.sql`)
+- 📦 Docker volume WebDAV (если существует)
+
+### Опционально:
+- 📁 Вся папка SHM целиком, ИЛИ
+- 📄 Только `docker-compose.yml` и `.env`
+
+## 🚀 Быстрый старт
+
+### Установка
+
+```bash
+bash <(wget -qO- https://dignezzz.github.io/shm/backup/backup.sh)
+```
+
+или
+
+```bash
+bash backup.sh
+```
+
+### Настройка (5 простых шагов)
+
+#### 1️⃣ Выберите путь к SHM
+```
+📍 Specify the path to docker-compose.yml for SHM:
+  1) /root/shm
+  2) /opt/shm  ← рекомендуемый
+  3) Enter manually
+```
+
+#### 2️⃣ Выберите режим резервного копирования
+```
+📁 Do you want to backup the entire folder?
+  1) Yes, backup all files and subfolders  ← рекомендуется
+  2) No, backup only specific files
+```
+
+#### 3️⃣ Конфигурация БД (автоматически из .env или вручную)
+Скрипт автоматически прочитает настройки из `.env` файла, если он существует.
+
+#### 4️⃣ Настройте Telegram
+```
+📡 Telegram Settings:
+  Bot Token: 1234567890:ABCdefGHIjklMNOpqrsTUVwxyz  (от @BotFather)
+  Chat ID: -1001234567890  (ID вашего чата/канала)
+  Topic ID: (опционально, для топиков)
+```
+
+#### 5️⃣ Проверьте и подтвердите
+```
+====================================================
+   Configuration Summary
+====================================================
+📁 SHM Path:          /opt/shm
+📦 Backup Mode:       Full folder
+🗄️  DB Container:      shm-mysql-vsem
+💾 Database:          shm (user: root)
+📱 Telegram Chat:     -1001234567890
+
+Proceed with backup script creation? (Y/n):
+```
+
+## 📱 Как выглядят сообщения в Telegram
+
+### Обычный бэкап
+```
+✅ SHM Backup Complete
+
+🖥 Server: grizzly
+📅 Date: 2025-11-06 14:30:15 UTC
+📊 Archive: 23.5M
+
+📦 Contents:
+📁 Entire SHM folder
+📋 db_backup.sql (MySQL)
+💾 webdav-volume.tar.gz (shm-data)
+
+💾 Database: shm (145.67 MB)
+```
+
+### При разделении (>49MB)
+```
+✅ SHM Backup Complete
+
+📦 Part: 2 of 3 (49M)
+
+🖥 Server: grizzly
+📅 Date: 2025-11-06 14:30:15 UTC
+📊 Archive: 135M
+...
+```
+
+## ⏰ Автоматизация через Crontab
+
+```bash
+crontab -e
+```
+
+Добавьте одну из строк:
+
+```bash
+# Каждые 2 часа
+0 */2 * * * /opt/shm/backup.sh
+
+# Ежедневно в 3:00
+0 3 * * * /opt/shm/backup.sh
+
+# Каждые 6 часов
+0 */6 * * * /opt/shm/backup.sh
+
+# Два раза в день (3:00 и 15:00)
+0 3,15 * * * /opt/shm/backup.sh
+
+# Еженедельно по понедельникам в 02:30
+30 2 * * 1 /opt/shm/backup.sh
+```
+
+## 🛠 Ручной запуск
+
+```bash
+/opt/shm/backup.sh
+```
+
+Вы увидите:
+```
+Creating MySQL backup...
+✔ Database backup created successfully
+Detected WebDAV volume: shm-data
+✔ Volume shm-data backed up successfully
+Creating archive...
+Sending to Telegram...
+✔ Archive successfully sent
+✔ Backup completed successfully
+```
+
+## 🔒 Безопасность
+
+- ✅ Пароли читаются из `.env`, не хранятся в открытом виде
+- ✅ Временные файлы удаляются после выполнения
+- ✅ Строгая обработка ошибок
+- ✅ Рекомендуется ограничить права: `chmod 700 /opt/shm/backup.sh`
+
+## 📊 Что происходит при выполнении
+
+1. 📝 Создание дампа MySQL (`mysqldump --no-tablespaces`)
+2. 🔍 Автоопределение WebDAV volume из `docker-compose.yml`
+3. 📦 Резервное копирование volume через Alpine контейнер
+4. 🗜️ Создание tar.gz архива
+5. ✂️ Разделение на части по 49MB (если нужно)
+6. 📤 Отправка в Telegram с HTML-форматированием
+7. 🧹 Очистка временных файлов
+
+## ❓ Часто задаваемые вопросы
+
+**Q: Как получить Telegram Bot Token?**  
+A: Напишите [@BotFather](https://t.me/BotFather) → `/newbot` → следуйте инструкциям
+
+**Q: Как узнать Chat ID?**  
+A: Добавьте бота в чат → напишите что-то → откройте `https://api.telegram.org/bot<TOKEN>/getUpdates`
+
+**Q: Можно ли изменить настройки?**  
+A: Да, перезапустите `backup.sh` или отредактируйте `/opt/shm/backup.sh` вручную
+
+**Q: Volume не определился автоматически?**  
+A: Скрипт пропустит его с предупреждением. БД и файлы будут сохранены.
+
+**Q: Как восстановить из backup?**  
+A:
+```bash
+# Распаковать
+tar -xzf backup.tar.gz
+
+# Восстановить БД
+docker exec -i shm-mysql-vsem mysql -u root -p < db_backup.sql
+
+# Восстановить volume
+docker run --rm -v shm-data:/volume -v $(pwd):/backup alpine \
+    tar xzf /backup/webdav-volume.tar.gz -C /volume
+```
+
+## 🐛 Устранение проблем
+
+### Ошибка: "Failed to create database backup"
+Проверьте:
+- ✅ MySQL контейнер запущен: `docker ps | grep mysql`
+- ✅ Правильные credentials в `.env`
+- ✅ Имя контейнера корректно
+
+### Ошибка: "Telegram returned an error"
+Проверьте:
+- ✅ Токен бота правильный
+- ✅ Chat ID в правильном формате (`-100` для каналов)
+- ✅ Бот добавлен в чат/канал
+- ✅ У бота есть права на отправку файлов
+
+### Volume не найден
+- Проверьте: `docker volume ls | grep shm`
+- Убедитесь что WebDAV сервис запущен
+
+## 🎨 Особенности интерфейса
+
+### Интерактивная настройка:
+- ✨ Цветной терминал
+- 📋 Пронумерованные варианты
+- ✅ Подтверждение перед созданием
+- 📊 Резюме всех параметров
+
+### Telegram уведомления:
+- 💪 **Жирный текст** для заголовков (HTML)
+- 🔤 **Моноширинный шрифт** для данных
+- 🎨 **Эмодзи** для быстрой навигации
+- 📱 **Удобно на мобильном**
+
+## 📝 Changelog
+
+### v2.0 (2025-11-06)
+- ✨ Полный рефакторинг
+- 📱 HTML-форматирование в Telegram
+- 📊 Информация о сервере и размере БД
+- 🎨 Интерактивное резюме
+- 🔍 Автоопределение volume
+- 🛡️ Улучшенная обработка ошибок
+
+### v1.0
+- 🎉 Первый релиз
+
+## 📄 Лицензия
+
+MIT License
+
+## 👨‍💻 Автор
+
+[dignezzz](https://github.com/dignezzz)
+
+---
+
+**Сделано с ❤️ для SHM Community**
 
 ## 📝 Описание
 
