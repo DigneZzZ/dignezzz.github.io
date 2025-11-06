@@ -1,6 +1,6 @@
 # SHM Backup Script Generator
 
-> 📚 **[Навигация по документации](INDEX.md)** | ⚡ **[Quick Start](QUICKSTART.md)** | 🔧 **[Автоустановка](AUTO_INSTALL.md)** | 🆕 **[Что нового в v2.1](RELEASE_NOTES_v2.1.md)**
+> 📚 **[Навигация по документации](INDEX.md)** | ⚡ **[Quick Start](QUICKSTART.md)** | 
 
 Удобный и безопасный скрипт для автоматического создания резервных копий SHM (Server Hosting Manager) с отправкой в Telegram.
 
