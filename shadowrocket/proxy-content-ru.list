@@ -1,0 +1,9 @@
+# NAME: Proxy Media Russia
+# UPDATED: 2023-09-19 22:00:00
+DOMAIN-SUFFIX,sso.ya.ru
+DOMAIN-SUFFIX,kinopoisk.ru
+DOMAIN-SUFFIX,hd.kinopoisk.ru
+DOMAIN-SUFFIX,sso.kinopoisk.ru
+DOMAIN-SUFFIX,api.ott.kinopoisk.ru
+DOMAIN-SUFFIX,graphql.kinopoisk.ru
+DOMAIN-SUFFIX,payment-widget.plus.kinopoisk.ru

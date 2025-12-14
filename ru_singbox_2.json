@@ -1,0 +1,171 @@
+{
+    "log": {
+      "disabled": false,
+      "level": "warn",
+      "timestamp": true
+    },
+    "dns": {
+      "servers": [
+        {
+          "tag": "dns_proxy_udp",
+          "address": "udp://1.1.1.1",
+          "address_resolver": "dns_direct",
+          "strategy": "prefer_ipv4",
+          "detour": "proxy"
+        },
+        {
+          "tag": "dns_proxy_tcp",
+          "address": "tcp://1.1.1.1",
+          "address_resolver": "dns_direct",
+          "strategy": "prefer_ipv4",
+          "detour": "proxy"
+        },
+        {
+          "tag": "dns_proxy",
+          "address": "https://1.1.1.1/dns-query",
+          "address_resolver": "dns_direct",
+          "strategy": "prefer_ipv4",
+          "detour": "proxy"
+        },
+        {
+          "tag": "dns_direct",
+          "address": "local",
+          "strategy": "prefer_ipv4",
+          "detour": "direct"
+        },
+        {
+          "tag": "dns_block",
+          "address": "rcode://success"
+        }
+      ],
+      "rules": [
+        {
+          "outbound": "any",
+          "server": "dns_direct"
+        }
+      ],
+      "fakeip": {
+        "inet4_range": "198.18.0.1/16"
+      },
+      "independent_cache": true
+    },
+    "inbounds": [
+      {
+        "type": "tun",
+        "mtu": 9000,
+        "interface_name": "tun125",
+        "tag": "tun-in",
+        "inet4_address": "172.19.0.1/30",
+        "inet6_address": "fdfe:dcba:9876::1/126",
+        "auto_route": true,
+        "strict_route": true,
+        "endpoint_independent_nat": true,
+        "stack": "mixed",
+        "sniff": true
+      }
+    ],
+    "outbounds": [
+      {
+        "type": "selector",
+        "tag": "proxy",
+        "interrupt_exist_connections": true,
+        "outbounds": []
+      },
+      {
+        "type": "urltest",
+        "tag": "️ Самый быстрый",
+        "outbounds": null,
+        "url": "https://www.gstatic.com/generate_204",
+        "interval": "1m0s"
+      },
+      {
+        "type": "direct",
+        "tag": "direct"
+      },
+      {
+        "type": "block",
+        "tag": "block"
+      },
+      {
+        "type": "dns",
+        "tag": "dns-out"
+      }
+    ],
+    "route": {
+      
+      "rules": [
+        {
+          "protocol": "dns",
+          "outbound": "dns-out"
+        },
+       
+    
+        {
+            "rule_set": "geoip-ru",
+            "outbound": "direct"
+          },
+          {
+            "ip_is_private": true,
+            "outbound": "direct"
+          },
+          {
+            "rule_set": [
+              "YouTube",
+              "Telegram",
+              "geoip-google",
+              "geoip-telegram"
+            ],
+            "outbound": "direct"
+        }
+        
+      ],
+      "rule_set": [
+        {
+          "type": "remote",
+          "tag": "geoip-ru",
+          "format": "binary",
+          "url": "https://mirror.ghproxy.com/https://raw.githubusercontent.com/CHIZI-0618/v2ray-rules-dat/release/singbox_ip_rule_set/geoip-ru.srs",
+          "download_detour": "direct"
+        },
+        {
+          "type": "remote",
+          "tag": "geoip-google",
+          "format": "binary",
+          "url": "https://mirror.ghproxy.com/https://raw.githubusercontent.com/CHIZI-0618/v2ray-rules-dat/release/singbox_ip_rule_set/geoip-google.srs",
+          "download_detour": "direct"
+        },
+        {
+          "type": "remote",
+          "tag": "geoip-telegram",
+          "format": "binary",
+          "url": "https://mirror.ghproxy.com/https://raw.githubusercontent.com/CHIZI-0618/v2ray-rules-dat/release/singbox_ip_rule_set/geoip-telegram.srs",
+          "download_detour": "direct"
+        },
+        
+        {
+          "type": "remote",
+          "tag": "YouTube",
+          "format": "source",
+          "url": "https://mirror.ghproxy.com/https://raw.githubusercontent.com/yangchuansheng/sing-box-geosite/main/rule/YouTube.json",
+          "download_detour": "direct"
+        },
+        {
+          "type": "remote",
+          "tag": "Telegram",
+          "format": "source",
+          "url": "https://mirror.ghproxy.com/https://raw.githubusercontent.com/yangchuansheng/sing-box-geosite/main/rule/Telegram.json",
+          "download_detour": "direct"
+        }
+  
+    
+      ],
+      "final": "direct",
+      "find_process": true,
+      "auto_detect_interface": true
+    },
+    "experimental": {
+        "cache_file": {
+            "enabled": true
+          }
+     }
+  }
