@@ -3,6 +3,7 @@
 # SSH Security Configuration Script
 # Created by GIG.ovh Community
 # https://gig.ovh
+# Version: 2.0.0
 
 set -euo pipefail
 
@@ -15,6 +16,17 @@ readonly CYAN='\033[1;36m'
 readonly NC='\033[0m'
 
 readonly SSHD_CONFIG="/etc/ssh/sshd_config"
+
+# Глобальные переменные для версии SSH (инициализируются позже)
+SSH_VERSION=""
+SSH_MAJOR=0
+SSH_MINOR=0
+
+# Переменная для резервной копии (для trap)
+CONFIG_BACKUP=""
+
+# Язык по умолчанию
+LANG_RU=false
 
 # ==================== Утилиты ====================
 log_info() { echo -e "${CYAN}$1${NC}"; }
@@ -65,14 +77,65 @@ msg() {
     service_warning)
       [[ "$LANG_RU" == true ]] && log_warning "Предупреждение: SSH сервис перезапущен, но может работать некорректно. Проверьте подключение." \
         || log_warning "Warning: SSH service restarted but may not be working correctly. Check connection." ;;
+    invalid_keys)
+      [[ "$LANG_RU" == true ]] && echo -e "${RED}Ошибка:${NC} В файле authorized_keys не найдено валидных SSH-ключей." \
+        || echo -e "${RED}Error:${NC} No valid SSH keys found in authorized_keys file." ;;
+    keys_found)
+      [[ "$LANG_RU" == true ]] && echo -e "${GREEN}Найдено валидных SSH-ключей:${NC} ${args[0]}" \
+        || echo -e "${GREEN}Valid SSH keys found:${NC} ${args[0]}" ;;
+    include_warning)
+      [[ "$LANG_RU" == true ]] && log_warning "Обнаружены Include директивы! Конфиги из включённых файлов могут перезаписать настройки." \
+        || log_warning "Include directives detected! Configs from included files may override settings." ;;
+    include_fixed)
+      [[ "$LANG_RU" == true ]] && echo -e "${GREEN}Настройки безопасности применены ко всем включённым конфигам.${NC}" \
+        || echo -e "${GREEN}Security settings applied to all included configs.${NC}" ;;
   esac
 }
+
+# ==================== Очистка при прерывании ====================
+cleanup() {
+  local exit_code=$?
+  if [[ -n "$CONFIG_BACKUP" && -f "$CONFIG_BACKUP" && $exit_code -ne 0 ]]; then
+    if [[ "$LANG_RU" == true ]]; then
+      log_warning "Прерывание! Восстанавливаю исходный конфиг..."
+    else
+      log_warning "Interrupted! Restoring original config..."
+    fi
+    cp "$CONFIG_BACKUP" "$SSHD_CONFIG" 2>/dev/null || true
+  fi
+  exit $exit_code
+}
+
+trap cleanup INT TERM
 
 # ==================== Проверки ====================
 check_root() {
   if [[ "$EUID" -ne 0 ]]; then
-    log_error "Пожалуйста, запустите скрипт от root или через sudo."
+    # До выбора языка выводим на обоих языках
     log_error "Please run script as root or via sudo."
+    log_error "Пожалуйста, запустите скрипт от root или через sudo."
+    exit 1
+  fi
+}
+
+check_sshd_config_exists() {
+  if [[ ! -f "$SSHD_CONFIG" ]]; then
+    if [[ "$LANG_RU" == true ]]; then
+      log_error "Файл конфигурации SSH не найден: $SSHD_CONFIG"
+    else
+      log_error "SSH configuration file not found: $SSHD_CONFIG"
+    fi
+    exit 1
+  fi
+}
+
+check_ssh_installed() {
+  if ! command -v sshd >/dev/null 2>&1; then
+    if [[ "$LANG_RU" == true ]]; then
+      log_error "SSH сервер (sshd) не установлен в системе."
+    else
+      log_error "SSH server (sshd) is not installed on the system."
+    fi
     exit 1
   fi
 }
@@ -123,6 +186,70 @@ get_authorized_keys_path() {
   fi
 }
 
+# ==================== Валидация SSH ключей ====================
+# Проверяет, что в authorized_keys есть хотя бы один валидный ключ
+validate_ssh_keys() {
+  local authorized_keys="$1"
+  local valid_key_count=0
+  
+  # Допустимые типы ключей
+  local key_types="ssh-rsa|ssh-dss|ssh-ed25519|ecdsa-sha2-nistp256|ecdsa-sha2-nistp384|ecdsa-sha2-nistp521|sk-ssh-ed25519|sk-ecdsa-sha2-nistp256"
+  
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    # Пропускаем пустые строки и комментарии
+    [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
+    
+    # Проверяем, начинается ли строка с валидного типа ключа
+    if echo "$line" | grep -qE "^($key_types)[[:space:]]"; then
+      ((valid_key_count++))
+    fi
+  done < "$authorized_keys"
+  
+  echo "$valid_key_count"
+}
+
+# ==================== Обработка Include директив ====================
+# Находит все включённые конфиги и применяет к ним те же настройки
+get_included_configs() {
+  local includes=()
+  
+  # Ищем Include директивы в основном конфиге
+  while IFS= read -r line; do
+    # Извлекаем путь из Include директивы
+    local include_path
+    include_path=$(echo "$line" | sed -E 's/^[[:space:]]*Include[[:space:]]+//' | tr -d '"')
+    
+    # Разворачиваем glob-паттерны
+    for file in $include_path; do
+      [[ -f "$file" ]] && includes+=("$file")
+    done
+  done < <(grep -iE '^[[:space:]]*Include[[:space:]]' "$SSHD_CONFIG" 2>/dev/null || true)
+  
+  printf '%s\n' "${includes[@]}"
+}
+
+# Применяет критичные настройки безопасности к включённому конфигу
+apply_security_to_included() {
+  local config_file="$1"
+  
+  # Критичные настройки, которые должны быть одинаковыми везде
+  local critical_settings=(
+    "PasswordAuthentication no"
+    "PermitEmptyPasswords no"
+    "PubkeyAuthentication yes"
+  )
+  
+  for setting in "${critical_settings[@]}"; do
+    local param_name="${setting%% *}"
+    
+    # Если параметр есть в файле — обновляем, если нет — не добавляем (чтобы не засорять)
+    if grep -qE "^[#[:space:]]*${param_name}[[:space:]]" "$config_file" 2>/dev/null; then
+      sed -i '' "s|^[#[:space:]]*${param_name}[[:space:]].*|${setting}|" "$config_file" 2>/dev/null || \
+      sed -i "s|^[#[:space:]]*${param_name}[[:space:]].*|${setting}|" "$config_file"
+    fi
+  done
+}
+
 # ==================== Работа с конфигурацией ====================
 add_or_update_config() {
   local param_value="$1"
@@ -137,7 +264,11 @@ add_or_update_config() {
 }
 
 test_sshd_config() {
-  command -v sshd >/dev/null 2>&1 && sshd -t -f "$SSHD_CONFIG" 2>/dev/null
+  if ! command -v sshd >/dev/null 2>&1; then
+    log_error "sshd not found"
+    return 1
+  fi
+  sshd -t -f "$SSHD_CONFIG" 2>/dev/null
 }
 
 # ==================== Версия SSH ====================
@@ -184,6 +315,7 @@ apply_security_settings() {
     "PermitEmptyPasswords no"
     "PasswordAuthentication no"
     "PermitRootLogin prohibit-password"
+    "StrictModes yes"
   )
   
   for setting in "${base_settings[@]}"; do
@@ -211,12 +343,12 @@ apply_security_settings() {
   local additional_settings=(
     "LoginGraceTime 30s"
     "MaxAuthTries 3"
-    "MaxSessions 2"
+    "MaxSessions 5"
     "MaxStartups 10:30:60"
     "AllowTcpForwarding local"
     "X11Forwarding no"
     "ClientAliveInterval 300"
-    "ClientAliveCountMax 0"
+    "ClientAliveCountMax 3"
     "Compression no"
     "TCPKeepAlive yes"
     "UseDNS no"
@@ -261,24 +393,42 @@ restart_ssh_service() {
 main() {
   check_root
   select_language
+  
+  # Проверяем наличие SSH сервера и конфига
+  check_ssh_installed
+  check_sshd_config_exists
+  
   confirm_changes
   
   # Инициализация переменных
   local authorized_keys
   authorized_keys=$(get_authorized_keys_path)
-  local config_backup="${SSHD_CONFIG}.bak_$(date +%Y%m%d_%H%M%S)"
+  CONFIG_BACKUP="${SSHD_CONFIG}.bak_$(date +%Y%m%d_%H%M%S)"
   
-  # Проверяем наличие публичных ключей
+  # Проверяем наличие файла ключей
   if [[ ! -s "$authorized_keys" ]]; then
     msg error_key
     msg keys_path "$authorized_keys"
     exit 1
   fi
   
+  # Валидируем SSH ключи
+  local valid_keys
+  valid_keys=$(validate_ssh_keys "$authorized_keys")
+  
+  if [[ "$valid_keys" -eq 0 ]]; then
+    msg invalid_keys
+    msg keys_path "$authorized_keys"
+    exit 1
+  fi
+  
+  msg keys_found "$valid_keys"
+  msg keys_path "$authorized_keys"
+  
   # Создаём резервную копию
-  cp "$SSHD_CONFIG" "$config_backup"
+  cp "$SSHD_CONFIG" "$CONFIG_BACKUP"
   msg backup_created
-  echo -e "${BLUE}$config_backup${NC}"
+  echo -e "${BLUE}$CONFIG_BACKUP${NC}"
   
   # Определяем ОС
   if [[ -f /etc/os-release ]]; then
@@ -297,7 +447,24 @@ main() {
     echo -e "${BLUE}$SSH_VERSION${NC}"
   fi
   
-  # Применяем настройки безопасности
+  # Проверяем Include директивы и обрабатываем вложенные конфиги
+  local included_configs
+  mapfile -t included_configs < <(get_included_configs)
+  
+  if [[ ${#included_configs[@]} -gt 0 ]]; then
+    msg include_warning
+    echo -e "${YELLOW}Include files:${NC}"
+    for inc_config in "${included_configs[@]}"; do
+      echo -e "  ${BLUE}$inc_config${NC}"
+      # Создаём резервную копию включённого конфига
+      cp "$inc_config" "${inc_config}.bak_$(date +%Y%m%d_%H%M%S)" 2>/dev/null || true
+      # Применяем критические настройки
+      apply_security_to_included "$inc_config"
+    done
+    msg include_fixed
+  fi
+  
+  # Применяем настройки безопасности к основному конфигу
   apply_security_settings
   
   # Устанавливаем права доступа
@@ -306,7 +473,7 @@ main() {
   # Проверяем корректность конфигурации
   if ! test_sshd_config; then
     msg invalid_config
-    cp "$config_backup" "$SSHD_CONFIG"
+    cp "$CONFIG_BACKUP" "$SSHD_CONFIG"
     exit 1
   fi
   
@@ -314,7 +481,7 @@ main() {
   local ssh_service
   ssh_service=$(get_ssh_service)
   
-  if ! restart_ssh_service "$ssh_service" "$config_backup"; then
+  if ! restart_ssh_service "$ssh_service" "$CONFIG_BACKUP"; then
     exit 1
   fi
   
@@ -325,7 +492,7 @@ main() {
   
   local ssh_port
   ssh_port=$(grep -E '^Port' "$SSHD_CONFIG" | awk '{print $2}')
-  echo -e "${CYAN}SSH порт: ${NC}${ssh_port:-22}"
+  echo -e "${CYAN}SSH порт / SSH port: ${NC}${ssh_port:-22}"
   echo
   echo -e "${CYAN}© GIG.ovh Community - https://gig.ovh${NC}"
 }
