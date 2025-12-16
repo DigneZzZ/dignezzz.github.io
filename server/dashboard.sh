@@ -5,7 +5,7 @@
 # ============================================================================
 # Description: Modern, configurable MOTD dashboard for Linux servers
 # Author: DigneZzZ - https://gig.ovh
-# Version: 2025.12.14.2
+# Version: 2025.12.16.1
 # License: MIT
 # ============================================================================
 
@@ -14,7 +14,7 @@ set -euo pipefail  # Exit on error, undefined variable, pipe failure
 # ============================================================================
 # CONSTANTS
 # ============================================================================
-readonly SCRIPT_VERSION="2025.12.14.2"
+readonly SCRIPT_VERSION="2025.12.16.1"
 readonly SCRIPT_NAME="GIG MOTD Dashboard"
 readonly REMOTE_URL="https://dignezzz.github.io/server/dashboard.sh"
 
@@ -137,28 +137,19 @@ setup_paths_for_os() {
         return
     fi
     
+    # Root mode - common paths for all OS
+    CONFIG_GLOBAL="/etc/motdrc"
+    MOTD_CONFIG_TOOL="/usr/local/bin/motd-config"
+    MOTD_VIEWER="/usr/local/bin/motd"
+    
+    # Only DASHBOARD_FILE differs between OS
     case "$OS_TYPE" in
         debian)
-            # Debian/Ubuntu use /etc/update-motd.d/
             DASHBOARD_FILE="/etc/update-motd.d/99-dashboard"
-            CONFIG_GLOBAL="/etc/motdrc"
-            MOTD_CONFIG_TOOL="/usr/local/bin/motd-config"
-            MOTD_VIEWER="/usr/local/bin/motd"
             ;;
-        rhel)
-            # CentOS/AlmaLinux use /etc/profile.d/
+        rhel|*)
             DASHBOARD_FILE="/etc/profile.d/motd.sh"
-            CONFIG_GLOBAL="/etc/motdrc"
-            MOTD_CONFIG_TOOL="/usr/local/bin/motd-config"
-            MOTD_VIEWER="/usr/local/bin/motd"
-            ;;
-        *)
-            # Unknown OS - try /etc/profile.d/ as fallback
-            DASHBOARD_FILE="/etc/profile.d/motd.sh"
-            CONFIG_GLOBAL="/etc/motdrc"
-            MOTD_CONFIG_TOOL="/usr/local/bin/motd-config"
-            MOTD_VIEWER="/usr/local/bin/motd"
-            warning "Using fallback paths for unknown OS"
+            [ "$OS_TYPE" = "unknown" ] && warning "Using fallback paths for unknown OS"
             ;;
     esac
 }
@@ -694,7 +685,7 @@ fi
 cat > "$TMP_FILE" << 'EOF'
 #!/bin/bash
 
-CURRENT_VERSION="2025.12.14.2"
+CURRENT_VERSION="2025.12.16.1"
 REMOTE_URL="https://dignezzz.github.io/server/dashboard.sh"
 CONFIG_GLOBAL="/etc/motdrc"
 
@@ -964,9 +955,8 @@ fail2ban_installed=false
 if [ "$SHOW_FAIL2BAN_STATS" = true ]; then
     if command -v fail2ban-client &>/dev/null; then
         fail2ban_installed=true
-        # Кэшируем на 60 секунд
         f2b_cache="/tmp/motd-f2b-banned"
-        if [ -f "$f2b_cache" ] && [ $(($(date +%s) - $(stat -c %Y "$f2b_cache" 2>/dev/null || echo 0))) -lt 60 ]; then
+        if cache_valid "$f2b_cache" 60; then
             fail2ban_banned=$(cat "$f2b_cache" 2>/dev/null || echo 0)
         else
             # Быстрый подсчёт через один вызов
@@ -983,7 +973,7 @@ if [ "$SHOW_FAIL2BAN_STATS" = true ]; then
     if command -v cscli &>/dev/null; then
         crowdsec_installed=true
         cs_cache="/tmp/motd-cs-banned"
-        if [ -f "$cs_cache" ] && [ $(($(date +%s) - $(stat -c %Y "$cs_cache" 2>/dev/null || echo 0))) -lt 60 ]; then
+        if cache_valid "$cs_cache" 60; then
             crowdsec_banned=$(cat "$cs_cache" 2>/dev/null || echo 0)
         else
             crowdsec_banned=$(cscli decisions list -o raw 2>/dev/null | tail -n +2 | wc -l)
@@ -1091,7 +1081,7 @@ fi
 # SSL сертификаты (только если включено) - КЭШИРОВАНИЕ на 6 часов
 if [ "$SHOW_SSL_CERTS" = true ]; then
     ssl_cache="/tmp/motd-ssl-certs"
-    if [ -f "$ssl_cache" ] && [ $(($(date +%s) - $(stat -c %Y "$ssl_cache" 2>/dev/null || echo 0))) -lt 21600 ]; then
+    if cache_valid "$ssl_cache" 21600; then
         ssl_expiring=$(cat "$ssl_cache" 2>/dev/null)
     else
         ssl_expiring=""
@@ -1136,7 +1126,7 @@ if [ "$SHOW_DOCKER_VOLUMES" = true ]; then
     docker_volumes_usage=""
     if command -v docker &>/dev/null; then
         dv_cache="/tmp/motd-docker-volumes"
-        if [ -f "$dv_cache" ] && [ $(($(date +%s) - $(stat -c %Y "$dv_cache" 2>/dev/null || echo 0))) -lt 300 ]; then
+        if cache_valid "$dv_cache" 300; then
             docker_volumes_usage=$(cat "$dv_cache" 2>/dev/null)
         else
             docker_volumes_count=$(docker volume ls -q 2>/dev/null | wc -l)
@@ -1161,7 +1151,7 @@ if [ "$SHOW_DOCKER" = true ]; then
     docker_msg_extra=""
     if command -v docker &>/dev/null; then
         dc_cache="/tmp/motd-docker-containers"
-        if [ -f "$dc_cache" ] && [ $(($(date +%s) - $(stat -c %Y "$dc_cache" 2>/dev/null || echo 0))) -lt 30 ]; then
+        if cache_valid "$dc_cache" 30; then
             docker_msg=$(head -1 "$dc_cache" 2>/dev/null)
             docker_msg_extra=$(tail -n +2 "$dc_cache" 2>/dev/null)
         else
@@ -1221,8 +1211,7 @@ fi
 # Firewall (только если включено для Security блока) - с кэшированием (экономия ~100ms)
 if [ "$SHOW_SECURITY" = true ]; then
     cache_file="/tmp/motd-firewall-status"
-    # Кэшируем на 30 секунд
-    if [ -f "$cache_file" ] && [ $(($(date +%s) - $(stat -c %Y "$cache_file" 2>/dev/null || echo 0))) -lt 30 ]; then
+    if cache_valid "$cache_file" 30; then
         ufw_status=$(cat "$cache_file")
     else
         if [ "$OS_TYPE" = "debian" ]; then
@@ -1275,8 +1264,7 @@ fi
 # Обновления (только если включено) - с кэшированием (экономия ~545ms)
 if [ "$SHOW_UPDATES" = true ]; then
     cache_file="/tmp/motd-updates-count"
-    # Кэшируем на 1 час (3600 секунд)
-    if [ -f "$cache_file" ] && [ $(($(date +%s) - $(stat -c %Y "$cache_file" 2>/dev/null || echo 0))) -lt 3600 ]; then
+    if cache_valid "$cache_file" 3600; then
         updates=$(cat "$cache_file" 2>/dev/null || echo "0")
     else
         if [ "$OS_TYPE" = "debian" ]; then
@@ -1541,6 +1529,9 @@ echo "===================================================="
 # === Функция: Финализация установки (избегаем дублирования кода) ===
 finalize_installation() {
     mv "$TMP_FILE" "$DASHBOARD_FILE"
+    
+    # Очистка кэша версий после обновления
+    rm -f /tmp/motd-update-available /tmp/motd-remote-version 2>/dev/null
     
     if [ "$INSTALL_USER_MODE" = false ]; then
         chmod +x "$DASHBOARD_FILE"
