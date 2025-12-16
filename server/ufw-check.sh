@@ -36,6 +36,7 @@ DEFAULT_INTERNAL_SERVICES=(
   "named"
   "ntpd"
   "sshd"  # SSH уже обрабатывается отдельно
+  "docker-proxy"  # Внутренний механизм Docker - порты определяются через docker inspect
 )
 
 # Список внутренних портов, которые не нужно открывать (по умолчанию)
@@ -317,8 +318,9 @@ parse_rules() {
 
 # Проверка, является ли порт/сервис внутренним
 is_internal() {
-  local port=$1
-  local service=${service_map[$port]:-""}
+  local port="$1"
+  [[ -z "$port" ]] && return 1
+  local service="${service_map["$port"]:-}"
   
   # Проверяем по списку игнорируемых портов
   for ignore_port in "${IGNORE_PORTS[@]}"; do
@@ -333,6 +335,11 @@ is_internal() {
       return 0  # true
     fi
   done
+  
+  # Проверяем docker-proxy без известного контейнера
+  if [[ "$service" == *"docker: (внутренний)"* ]]; then
+    return 0  # true
+  fi
   
   # Проверяем по списку внутренних сервисов
   for internal_service in "${INTERNAL_SERVICES[@]}"; do
@@ -356,6 +363,10 @@ is_internal() {
 
 # 2) Определение используемых портов и сервисов
 check_used() {
+  # Сначала собираем информацию о Docker-контейнерах (чтобы знать их порты)
+  collect_docker_ports
+  collect_podman_ports
+  
   # ss-прослушивание
   while read -r pr addr proc; do
     # Извлекаем порт из адреса (поддержка IPv4 и IPv6)
@@ -382,9 +393,24 @@ check_used() {
       if [[ -z "$service_name" ]]; then
         service_name=$(echo "$proc" | cut -d: -f2 | tr -d '(")')
       fi
-      if [[ -n "$service_name" ]]; then
-        service_map["$key"]="сервис: $service_name"
-        service_map["$port"]="сервис: $service_name"
+      
+      # Если это docker-proxy, проверяем, есть ли информация о контейнере
+      if [[ "$service_name" == "docker-proxy" ]]; then
+        # Проверяем, есть ли уже информация о контейнере для этого порта
+        if [[ -n "${docker_port_map[$port]:-}" ]]; then
+          service_map["$key"]="docker: ${docker_port_map[$port]}"
+          service_map["$port"]="docker: ${docker_port_map[$port]}"
+        else
+          # docker-proxy без известного контейнера - пропускаем (внутренний)
+          service_map["$key"]="docker: (внутренний)"
+          service_map["$port"]="docker: (внутренний)"
+        fi
+      elif [[ -n "$service_name" ]]; then
+        # Проверяем, нет ли уже информации о контейнере (она приоритетнее)
+        if [[ -z "${service_map[$key]:-}" ]]; then
+          service_map["$key"]="сервис: $service_name"
+          service_map["$port"]="сервис: $service_name"
+        fi
       fi
     fi
     
@@ -398,20 +424,15 @@ check_used() {
     fi
   done < <(ss -tulnpH | awk '{print tolower($1), $5, $7}')
 
-  # Проверка контейнеров: Docker
-  check_docker_containers
-  
-  # Проверка контейнеров: Podman
-  check_podman_containers
-  
   # Проверка systemd-сервисов (опционально)
   if [[ "$CHECK_SYSTEMD" == "true" ]]; then
     check_systemd_services
   fi
 }
 
-# Проверка Docker-контейнеров
-check_docker_containers() {
+# Сбор информации о Docker-портах (вызывается до ss)
+declare -A docker_port_map
+collect_docker_ports() {
   if ! command -v docker &>/dev/null || ! docker ps &>/dev/null 2>&1; then
     return 0
   fi
@@ -431,16 +452,20 @@ check_docker_containers() {
     for mapping in "${port_mappings[@]}"; do
       [[ -z "$mapping" ]] && continue
       read -r kp hp <<< "$mapping"
-      # kp: containerPort/proto, hp: hostPort
       [[ -z "$hp" ]] && continue
       proto=${kp##*/}
       key="${hp}/${proto}"
+      
+      # Запоминаем соответствие порт -> контейнер
+      docker_port_map["$hp"]="$container_name"
+      docker_port_map["$key"]="$container_name"
+      
       used_map["$key"]=1
       used_map["$hp"]=1
       service_map["$key"]="docker: $container_name"
       service_map["$hp"]="docker: $container_name"
       
-      # Проверяем, открыт ли порт в UFW и не является ли он внутренним
+      # Проверяем, открыт ли порт в UFW
       if [[ -z "${port_set[$key]:-}" && -z "${port_set[$hp]:-}" ]]; then
         if ! is_internal "$key"; then
           missing_ports+=("$key")
@@ -450,8 +475,8 @@ check_docker_containers() {
   done
 }
 
-# Проверка Podman-контейнеров
-check_podman_containers() {
+# Сбор информации о Podman-портах
+collect_podman_ports() {
   if ! command -v podman &>/dev/null || ! podman ps &>/dev/null 2>&1; then
     return 0
   fi
@@ -462,14 +487,12 @@ check_podman_containers() {
   for container_name in "${containers[@]}"; do
     [[ -z "$container_name" ]] && continue
     
-    # Podman использует похожий формат на Docker
     local port_mappings
     mapfile -t port_mappings < <(
       podman inspect "$container_name" \
         --format '{{range $k,$v := .NetworkSettings.Ports}}{{if $v}}{{printf "%s %s\n" $k (index $v 0).HostPort}}{{end}}{{end}}' 2>/dev/null
     )
     
-    # Если формат не сработал, пробуем альтернативный
     if [[ ${#port_mappings[@]} -eq 0 ]]; then
       mapfile -t port_mappings < <(
         podman port "$container_name" 2>/dev/null | awk -F'[ :/]+' '{print $1"/"$2, $4}'
@@ -482,6 +505,10 @@ check_podman_containers() {
       [[ -z "$hp" ]] && continue
       proto=${kp##*/}
       key="${hp}/${proto}"
+      
+      docker_port_map["$hp"]="$container_name"
+      docker_port_map["$key"]="$container_name"
+      
       used_map["$key"]=1
       used_map["$hp"]=1
       service_map["$key"]="podman: $container_name"
@@ -550,7 +577,8 @@ check_systemd_services() {
 add_ssh() {
   local sk port
   for sk in "${!service_map[@]}"; do
-    if [[ ${service_map[$sk]} == *"сервис: sshd"* ]] || [[ ${service_map[$sk]} == *"сервис: ssh"* ]]; then
+    [[ -z "$sk" ]] && continue
+    if [[ "${service_map["$sk"]}" == *"сервис: sshd"* ]] || [[ "${service_map["$sk"]}" == *"сервис: ssh"* ]]; then
       port=${sk%%/*}
       break
     fi
@@ -586,8 +614,8 @@ print_table() {
   unused_ports=()
   mapfile -t entries < <(printf "%s\n" "${!port_set[@]}" | sort -V)
   for e in "${entries[@]}"; do
-    # Пропускаем некорректные порты
-    [[ "$e" == "--" ]] && continue
+    # Пропускаем пустые и некорректные порты
+    [[ -z "$e" || "$e" == "--" ]] && continue
     
     # Пропускаем игнорируемые порты
     local skip=false
@@ -602,7 +630,7 @@ print_table() {
     used=false
     
     # Проверяем, используется ли порт
-    if [[ -n "${used_map[$e]:-}" ]]; then
+    if [[ -n "${used_map["$e"]:-}" ]]; then
       used=true
     fi
     
@@ -611,7 +639,7 @@ print_table() {
       status="${GREEN}Используемый${NC}"
     else
       # Не добавляем DENY правила в список неиспользуемых
-      if [[ "${rule_action[$e]:-ALLOW}" != "DENY" ]]; then
+      if [[ "${rule_action["$e"]:-ALLOW}" != "DENY" ]]; then
         status="${RED}Неиспользуемый${NC}"
         unused_ports+=("$e")
       else
@@ -620,14 +648,14 @@ print_table() {
     fi
     
     # Источник (IP/подсеть)
-    source="${rule_source[$e]:-Anywhere}"
+    source="${rule_source["$e"]:-Anywhere}"
     # Сокращаем если слишком длинный
     if [[ ${#source} -gt 14 ]]; then
       source="${source:0:11}..."
     fi
     
     # сервис/контейнер
-    svc=${service_map[$e]:-"-"}
+    svc="${service_map["$e"]:-"-"}"
     
     # Добавляем цвет к сервису
     if [[ $svc != "-" ]]; then
@@ -650,7 +678,8 @@ print_table() {
     mapfile -t unique_missing < <(printf "%s\n" "${missing_ports[@]}" | sort -u)
     
     for mp in "${unique_missing[@]}"; do
-      svc=${service_map[$mp]:-"-"}
+      [[ -z "$mp" ]] && continue
+      svc="${service_map["$mp"]:-"-"}"
       if [[ $svc != "-" ]]; then
         svc="${BLUE}${svc}${NC}"
       fi
@@ -754,7 +783,7 @@ cleanup() {
             echo "Симуляция: ufw delete allow $r"
           else
             # Проверяем, является ли правило DENY
-            if [[ "${rule_action[$r]:-ALLOW}" == "DENY" ]]; then
+            if [[ "${rule_action["$r"]:-ALLOW}" == "DENY" ]]; then
               output=$(ufw delete deny "$r" 2>&1) || true
             else
               output=$(ufw delete allow "$r" 2>&1) || true
