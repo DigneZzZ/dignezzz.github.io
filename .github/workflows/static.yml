@@ -15,21 +15,19 @@ permissions:
 
 concurrency:
   group: "pages"
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 env:
   TZ: Europe/Moscow
 
 jobs:
-  deploy:
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
+  generate-readme:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Git config
         run: |
@@ -52,7 +50,6 @@ jobs:
         run: |
           timestamp=$(date '+%Y-%m-%d %H:%M %Z')
           
-          # Per-category READMEs
           for dir in */; do
             [[ "$dir" =~ ^[._] ]] && continue
             
@@ -73,7 +70,6 @@ jobs:
             } > "${dir}README.md"
           done
           
-          # Root README
           {
             echo "# 🚀 Scripts Index"
             echo ""
@@ -109,6 +105,22 @@ jobs:
             git push
           fi
 
+  deploy:
+    needs: generate-readme
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+          fetch-depth: 0
+
+      - name: Pull latest changes
+        run: git pull origin main || true
+
       - name: Setup Pages
         uses: actions/configure-pages@v5
 
@@ -121,4 +133,4 @@ jobs:
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
-        timeout-minutes: 5
+        timeout-minutes: 10
