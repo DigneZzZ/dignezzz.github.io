@@ -10,6 +10,10 @@ on:
     paths:
       - 'shadowrocket/**'  # Запуск только при изменении shadowrocket файлов
 
+concurrency:
+  group: gen-rules
+  cancel-in-progress: true
+
 env:
   TZ: Europe/Moscow
   REPO_URL: https://raw.githubusercontent.com/${{ github.repository }}

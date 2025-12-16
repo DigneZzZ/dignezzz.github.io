@@ -5,6 +5,7 @@ on:
     branches: ["main"]
     paths-ignore:
       - '.github/workflows/gen.yml'
+      - '**/README.md'
   workflow_dispatch:
 
 permissions:
@@ -14,7 +15,7 @@ permissions:
 
 concurrency:
   group: "pages"
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 env:
   TZ: Europe/Moscow
@@ -104,7 +105,7 @@ jobs:
         run: |
           git add README.md */README.md
           if ! git diff --cached --quiet; then
-            git commit -m "🔄 Auto-generate README files"
+            git commit -m "🔄 Auto-generate README files [skip ci]"
             git push
           fi
 
@@ -120,3 +121,4 @@ jobs:
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
+        timeout-minutes: 5
