@@ -32,17 +32,20 @@ title: DigneZzZ Script Hub
 
 <style>
   .glass {
-    background: rgba(255, 255, 255, 0.05);
+    background: rgba(30, 27, 75, 0.95);
     backdrop-filter: blur(10px);
     -webkit-backdrop-filter: blur(10px);
-    border: 1px solid rgba(255, 255, 255, 0.1);
+    border: 1px solid rgba(139, 92, 246, 0.3);
   }
   .glass-light {
-    background: rgba(255, 255, 255, 0.7);
+    background: rgba(255, 255, 255, 0.95);
     backdrop-filter: blur(10px);
     -webkit-backdrop-filter: blur(10px);
-    border: 1px solid rgba(255, 255, 255, 0.3);
+    border: 1px solid rgba(139, 92, 246, 0.2);
   }
+  .dark .glass { background: rgba(30, 27, 75, 0.95); }
+  .light .glass { background: rgba(255, 255, 255, 0.95); border-color: rgba(139, 92, 246, 0.2); }
+  
   .gradient-text {
     background: linear-gradient(135deg, #667eea 0%, #764ba2 50%, #f093fb 100%);
     -webkit-background-clip: text;
@@ -51,6 +54,10 @@ title: DigneZzZ Script Hub
   }
   .gradient-bg {
     background: linear-gradient(-45deg, #0f172a, #1e1b4b, #312e81, #1e3a5f);
+    background-size: 400% 400%;
+  }
+  .light .gradient-bg {
+    background: linear-gradient(-45deg, #f8fafc, #e0e7ff, #c7d2fe, #ddd6fe);
     background-size: 400% 400%;
   }
   .card-hover {
@@ -71,32 +78,51 @@ title: DigneZzZ Script Hub
   }
   .copy-btn:active { transform: scale(0.95); }
   
-  /* Стили для markdown контента */
+  /* Стили для markdown контента - DARK MODE */
   .markdown-content table { width: 100%; border-collapse: collapse; margin: 1rem 0; }
   .markdown-content th, .markdown-content td { 
     padding: 0.75rem 1rem; 
     text-align: left; 
-    border-bottom: 1px solid rgba(255,255,255,0.1); 
+    border-bottom: 1px solid rgba(139, 92, 246, 0.3); 
   }
   .markdown-content th { 
     font-weight: 600; 
-    color: #a78bfa;
-    background: rgba(139, 92, 246, 0.1);
+    color: #c4b5fd;
+    background: rgba(139, 92, 246, 0.2);
+  }
+  .markdown-content td {
+    color: #e2e8f0;
   }
   .markdown-content code {
-    background: rgba(139, 92, 246, 0.2);
-    padding: 0.2rem 0.5rem;
+    background: #1e1b4b;
+    padding: 0.3rem 0.6rem;
     border-radius: 0.375rem;
-    font-size: 0.85em;
-    color: #c4b5fd;
+    font-size: 0.8em;
+    color: #22d3ee;
+    border: 1px solid rgba(139, 92, 246, 0.3);
+    word-break: break-all;
+    display: inline-block;
+    max-width: 100%;
   }
   .markdown-content a { color: #818cf8; }
   .markdown-content a:hover { color: #a78bfa; text-decoration: underline; }
   
   /* Light mode markdown */
-  .light .markdown-content th { color: #6d28d9; background: rgba(139, 92, 246, 0.1); }
-  .light .markdown-content th, .light .markdown-content td { border-color: rgba(0,0,0,0.1); }
-  .light .markdown-content code { background: rgba(139, 92, 246, 0.15); color: #6d28d9; }
+  .light .markdown-content th { 
+    color: #5b21b6; 
+    background: rgba(139, 92, 246, 0.15); 
+  }
+  .light .markdown-content td {
+    color: #1e293b;
+  }
+  .light .markdown-content th, .light .markdown-content td { 
+    border-color: rgba(139, 92, 246, 0.2); 
+  }
+  .light .markdown-content code { 
+    background: #f1f5f9; 
+    color: #7c3aed; 
+    border-color: rgba(139, 92, 246, 0.3);
+  }
   .light .markdown-content a { color: #6366f1; }
 </style>
 
@@ -120,7 +146,7 @@ title: DigneZzZ Script Hub
   </div>
 
   <!-- Navbar -->
-  <header class="sticky top-0 z-50 px-6 py-4 glass dark:glass glass-light">
+  <header class="sticky top-0 z-50 px-6 py-4 glass">
     <div class="max-w-6xl mx-auto flex justify-between items-center">
       <div class="flex items-center gap-3">
         <span class="text-2xl animate-float">🧠</span>
@@ -139,7 +165,7 @@ title: DigneZzZ Script Hub
         <a href="https://github.com/DigneZzZ/dignezzz.github.io" class="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg hover:bg-white/10 transition-all text-gray-700 dark:text-gray-300">
           <svg class="w-5 h-5" fill="currentColor" viewBox="0 0 24 24"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>
         </a>
-        <button id="toggleTheme" class="p-2 rounded-lg glass dark:glass glass-light hover:scale-110 transition-transform">
+        <button id="toggleTheme" class="p-2 rounded-lg glass hover:scale-110 transition-transform">
           <span class="dark:hidden">🌙</span>
           <span class="hidden dark:inline">☀️</span>
         </button>
@@ -160,7 +186,7 @@ title: DigneZzZ Script Hub
         <a href="#scripts" class="px-6 py-3 bg-gradient-to-r from-purple-600 to-blue-600 text-white rounded-xl font-medium hover:opacity-90 transition-all hover:scale-105 shadow-lg shadow-purple-500/25">
           📜 Все скрипты
         </a>
-        <a href="https://openode.xyz/subscriptions/" class="px-6 py-3 glass dark:glass glass-light rounded-xl font-medium hover:scale-105 transition-all text-gray-700 dark:text-white">
+        <a href="https://openode.xyz/subscriptions/" class="px-6 py-3 glass rounded-xl font-medium hover:scale-105 transition-all text-gray-700 dark:text-white">
           🚀 Премиум доступ
         </a>
       </div>
@@ -170,19 +196,19 @@ title: DigneZzZ Script Hub
   <!-- Stats -->
   <section class="px-6 py-8">
     <div class="max-w-4xl mx-auto grid grid-cols-2 md:grid-cols-4 gap-4">
-      <div class="glass dark:glass glass-light rounded-2xl p-6 text-center card-hover">
+      <div class="glass rounded-2xl p-6 text-center card-hover">
         <div class="text-3xl font-bold gradient-text">20+</div>
         <div class="text-sm text-gray-500 dark:text-gray-400 mt-1">Скриптов</div>
       </div>
-      <div class="glass dark:glass glass-light rounded-2xl p-6 text-center card-hover">
+      <div class="glass rounded-2xl p-6 text-center card-hover">
         <div class="text-3xl font-bold gradient-text">5+</div>
         <div class="text-sm text-gray-500 dark:text-gray-400 mt-1">Категорий</div>
       </div>
-      <div class="glass dark:glass glass-light rounded-2xl p-6 text-center card-hover">
+      <div class="glass rounded-2xl p-6 text-center card-hover">
         <div class="text-3xl font-bold gradient-text">24/7</div>
         <div class="text-sm text-gray-500 dark:text-gray-400 mt-1">Обновления</div>
       </div>
-      <div class="glass dark:glass glass-light rounded-2xl p-6 text-center card-hover">
+      <div class="glass rounded-2xl p-6 text-center card-hover">
         <div class="text-3xl font-bold gradient-text">Free</div>
         <div class="text-sm text-gray-500 dark:text-gray-400 mt-1">Open Source</div>
       </div>
@@ -196,7 +222,7 @@ title: DigneZzZ Script Hub
     <div class="grid md:grid-cols-2 gap-6 mb-12">
       
       <!-- Marzban Card -->
-      <div class="glass dark:glass glass-light rounded-2xl overflow-hidden card-hover">
+      <div class="glass rounded-2xl overflow-hidden card-hover">
         <div class="bg-gradient-to-r from-purple-600/20 to-pink-600/20 p-6 border-b border-white/10">
           <div class="flex items-center gap-3">
             <span class="text-4xl">⚙️</span>
@@ -216,7 +242,7 @@ title: DigneZzZ Script Hub
       </div>
 
       <!-- Server Card -->
-      <div class="glass dark:glass glass-light rounded-2xl overflow-hidden card-hover">
+      <div class="glass rounded-2xl overflow-hidden card-hover">
         <div class="bg-gradient-to-r from-blue-600/20 to-cyan-600/20 p-6 border-b border-white/10">
           <div class="flex items-center gap-3">
             <span class="text-4xl">🖥️</span>
@@ -236,7 +262,7 @@ title: DigneZzZ Script Hub
       </div>
 
       <!-- Shadowrocket Card -->
-      <div class="glass dark:glass glass-light rounded-2xl overflow-hidden card-hover">
+      <div class="glass rounded-2xl overflow-hidden card-hover">
         <div class="bg-gradient-to-r from-orange-600/20 to-yellow-600/20 p-6 border-b border-white/10">
           <div class="flex items-center gap-3">
             <span class="text-4xl">🚀</span>
@@ -256,7 +282,7 @@ title: DigneZzZ Script Hub
       </div>
 
       <!-- SHM Card -->
-      <div class="glass dark:glass glass-light rounded-2xl overflow-hidden card-hover">
+      <div class="glass rounded-2xl overflow-hidden card-hover">
         <div class="bg-gradient-to-r from-green-600/20 to-emerald-600/20 p-6 border-b border-white/10">
           <div class="flex items-center gap-3">
             <span class="text-4xl">💾</span>
@@ -277,7 +303,7 @@ title: DigneZzZ Script Hub
     </div>
 
     <!-- Full Scripts Index -->
-    <section class="glass dark:glass glass-light rounded-2xl overflow-hidden">
+    <section class="glass rounded-2xl overflow-hidden">
       <div class="bg-gradient-to-r from-indigo-600/20 to-purple-600/20 p-6 border-b border-white/10">
         <div class="flex items-center justify-between">
           <div class="flex items-center gap-3">
@@ -309,17 +335,17 @@ title: DigneZzZ Script Hub
     <div class="max-w-4xl mx-auto">
       <h2 class="text-2xl font-bold text-center mb-8 text-gray-800 dark:text-white">🔗 Полезные ресурсы</h2>
       <div class="grid md:grid-cols-3 gap-6">
-        <a href="https://openode.xyz" class="glass dark:glass glass-light rounded-2xl p-6 text-center card-hover group">
+        <a href="https://openode.xyz" class="glass rounded-2xl p-6 text-center card-hover group">
           <div class="text-4xl mb-4 group-hover:scale-110 transition-transform">💬</div>
           <h3 class="font-bold text-gray-800 dark:text-white mb-2">Forum</h3>
           <p class="text-sm text-gray-500 dark:text-gray-400">openode.xyz — форум с клубами</p>
         </a>
-        <a href="https://openode.xyz/subscriptions/" class="glass dark:glass glass-light rounded-2xl p-6 text-center card-hover group">
+        <a href="https://openode.xyz/subscriptions/" class="glass rounded-2xl p-6 text-center card-hover group">
           <div class="text-4xl mb-4 group-hover:scale-110 transition-transform">🔐</div>
           <h3 class="font-bold text-gray-800 dark:text-white mb-2">Premium Clubs</h3>
           <p class="text-sm text-gray-500 dark:text-gray-400">Marzban & Remnawave гайды</p>
         </a>
-        <a href="https://neonode.cc" class="glass dark:glass glass-light rounded-2xl p-6 text-center card-hover group">
+        <a href="https://neonode.cc" class="glass rounded-2xl p-6 text-center card-hover group">
           <div class="text-4xl mb-4 group-hover:scale-110 transition-transform">✍️</div>
           <h3 class="font-bold text-gray-800 dark:text-white mb-2">Blog</h3>
           <p class="text-sm text-gray-500 dark:text-gray-400">neonode.cc — технический блог</p>
