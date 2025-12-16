@@ -1,12 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
-declare -a unused_ports=()
-declare -a missing_ports=()
 
 # ufw-cleaner: автоматическая проверка и очистка неиспользуемых портов UFW
-# Поддерживает --dry-run и логирование
+# Поддерживает --dry-run, логирование и внешний конфиг
+# Версия: 2.0
+
+# ==============================================================================
+# Конфигурация (переопределяется из /etc/ufw-cleaner.conf)
+# ==============================================================================
 
 LOG=/var/log/ufw-cleaner.log
+BACKUP_DIR=/var/backups/ufw
+CONFIG_FILE=/etc/ufw-cleaner.conf
 DRY_RUN=false
 
 # Цвета для вывода
@@ -14,29 +19,172 @@ GREEN='\033[0;32m'
 RED='\033[0;31m'
 YELLOW='\033[0;33m'
 BLUE='\033[0;34m'
+CYAN='\033[0;36m'
 BOLD='\033[1m'
 NC='\033[0m' # No Color
 
+# Список внутренних сервисов, которые не нужно открывать (по умолчанию)
+DEFAULT_INTERNAL_SERVICES=(
+  "systemd-resolve"
+  "supervisord"
+  "dnsmasq"
+  "systemd"
+  "rpcbind"
+  "avahi"
+  "cups"
+  "dhcpd"
+  "named"
+  "ntpd"
+  "sshd"  # SSH уже обрабатывается отдельно
+)
+
+# Список внутренних портов, которые не нужно открывать (по умолчанию)
+DEFAULT_INTERNAL_PORTS=(
+  "53/tcp"  # DNS
+  "53/udp"  # DNS
+  "67/udp"  # DHCP
+  "68/udp"  # DHCP
+  "123/udp" # NTP
+  "631/tcp" # CUPS
+  "631/udp" # CUPS
+  "5353/udp" # mDNS
+)
+
+# Инициализируем рабочие массивы
+INTERNAL_SERVICES=("${DEFAULT_INTERNAL_SERVICES[@]}")
+INTERNAL_PORTS=("${DEFAULT_INTERNAL_PORTS[@]}")
+
+# ==============================================================================
+# Загрузка внешнего конфига
+# ==============================================================================
+
+load_config() {
+  if [[ -f "$CONFIG_FILE" ]]; then
+    echo -e "${CYAN}Загружаем конфигурацию из ${CONFIG_FILE}...${NC}"
+    # shellcheck source=/dev/null
+    source "$CONFIG_FILE"
+    log "CONFIG loaded from $CONFIG_FILE"
+  fi
+}
+
+# ==============================================================================
+# Создание примера конфига
+# ==============================================================================
+
+create_sample_config() {
+  cat << 'EOF'
+# /etc/ufw-cleaner.conf - Конфигурация ufw-cleaner
+# Раскомментируйте и измените нужные параметры
+
+# Путь к лог-файлу
+# LOG=/var/log/ufw-cleaner.log
+
+# Директория для резервных копий
+# BACKUP_DIR=/var/backups/ufw
+
+# Дополнительные внутренние сервисы (не будут предлагаться к открытию)
+# INTERNAL_SERVICES+=("myservice" "anotherservice")
+
+# Дополнительные внутренние порты (не будут предлагаться к открытию)
+# INTERNAL_PORTS+=("8080/tcp" "9000/udp")
+
+# Порты, которые нужно игнорировать (никогда не удалять и не предлагать)
+# IGNORE_PORTS=("22/tcp" "443/tcp" "80/tcp")
+
+# Включить проверку systemd-сервисов (порты остановленных сервисов)
+# CHECK_SYSTEMD=true
+EOF
+}
+
 usage() {
-  echo "Usage: $0 [--dry-run]" >&2
-  exit 1
+  echo "Usage: $0 [OPTIONS]"
+  echo ""
+  echo "Опции:"
+  echo "  --dry-run        Симуляция без реальных изменений"
+  echo "  --show-config    Показать пример конфигурационного файла"
+  echo "  --create-config  Создать конфигурационный файл /etc/ufw-cleaner.conf"
+  echo "  -h, --help       Показать эту справку"
+  echo ""
+  echo "Конфигурация: $CONFIG_FILE"
+  exit 0
 }
 
 # Разбор опций
 while [[ $# -gt 0 ]]; do
   case $1 in
-    --dry-run) DRY_RUN=true; shift ;;  
+    --dry-run) DRY_RUN=true; shift ;;
+    --show-config) create_sample_config; exit 0 ;;
+    --create-config)
+      if [[ -f "$CONFIG_FILE" ]]; then
+        echo "Конфиг уже существует: $CONFIG_FILE"
+        exit 1
+      fi
+      create_sample_config > "$CONFIG_FILE"
+      echo "Создан конфиг: $CONFIG_FILE"
+      exit 0
+      ;;
     -h|--help) usage ;;  
     *) usage ;;  
   esac
 done
 
 log() {
-  echo "$(date '+%F %T') $*" >> "$LOG"
+  # Проверяем возможность записи в лог
+  if [[ -w "$LOG" ]] || [[ -w "$(dirname "$LOG")" ]]; then
+    echo "$(date '+%F %T') $*" >> "$LOG" 2>/dev/null || true
+  fi
 }
 
 ensure_root() {
   [[ $EUID -eq 0 ]] || { echo -e "${RED}Требуются root-права${NC}" >&2; exit 1; }
+}
+
+# ==============================================================================
+# Резервное копирование правил UFW
+# ==============================================================================
+
+backup_rules() {
+  local backup_file="${BACKUP_DIR}/ufw-backup-$(date '+%Y%m%d-%H%M%S').txt"
+  
+  # Создаём директорию для бэкапов
+  mkdir -p "$BACKUP_DIR"
+  
+  echo -e "${CYAN}Создаём резервную копию правил UFW...${NC}"
+  {
+    echo "# UFW Backup - $(date)"
+    echo "# Восстановление: скопируйте команды ниже"
+    echo ""
+    echo "# Текущий статус:"
+    ufw status verbose
+    echo ""
+    echo "# Нумерованные правила:"
+    ufw status numbered
+    echo ""
+    echo "# Команды для восстановления:"
+    # Генерируем команды для восстановления
+    ufw status numbered | grep -E '^\[' | while read -r line; do
+      # Извлекаем правило без номера
+      rule=$(echo "$line" | sed 's/^\[[0-9]*\][[:space:]]*//')
+      port=$(echo "$rule" | awk '{print $1}')
+      action=$(echo "$rule" | awk '{print $2}')
+      direction=$(echo "$rule" | awk '{print $3}')
+      
+      if [[ "$action" == "ALLOW" ]]; then
+        if [[ "$direction" == "IN" ]] || [[ -z "$direction" ]]; then
+          echo "ufw allow $port"
+        fi
+      elif [[ "$action" == "DENY" ]]; then
+        echo "ufw deny $port"
+      fi
+    done
+  } > "$backup_file" 2>/dev/null || true
+  
+  if [[ -f "$backup_file" ]]; then
+    echo -e "${GREEN}Резервная копия сохранена: ${backup_file}${NC}"
+    log "BACKUP created: $backup_file"
+  else
+    echo -e "${YELLOW}Не удалось создать резервную копию${NC}"
+  fi
 }
 
 # Начальный статус UFW
@@ -46,8 +194,10 @@ if ufw status verbose 2>/dev/null | grep -q "Status: active"; then
 fi
 
 # Структуры данных
-declare -A proto_map port_set used_map service_map rule_action
-declare -a unused_ports missing_ports
+declare -A proto_map port_set used_map service_map rule_action rule_source
+declare -a unused_ports missing_ports systemd_ports
+declare -a IGNORE_PORTS=()  # Порты, которые нужно игнорировать
+CHECK_SYSTEMD=${CHECK_SYSTEMD:-false}  # Проверка systemd-сервисов
 
 # Список внутренних сервисов, которые не нужно открывать
 INTERNAL_SERVICES=(
@@ -76,11 +226,12 @@ INTERNAL_PORTS=(
   "5353/udp" # mDNS
 )
 
-# Список высоких портов, которые обычно используются для исходящих соединений
+# Список высоких портов (эфемерные порты для исходящих соединений)
+# RFC 6335: динамические/эфемерные порты 49152-65535
 is_high_port() {
   local port=$1
   port=${port%%/*}  # Убираем протокол, если есть
-  if [[ $port =~ ^[0-9]+$ ]] && [ "$port" -gt 32000 ]; then
+  if [[ $port =~ ^[0-9]+$ ]] && (( port >= 49152 )); then
     return 0  # true
   fi
   return 1  # false
@@ -89,18 +240,32 @@ is_high_port() {
 # 1) Извлечение портов из UFW или из файлов
 parse_rules() {
   if $initial_active; then
-    # Получаем полный список правил из ufw status
+    # Получаем полный список правил из ufw status verbose для лучшего парсинга
     while read -r line; do
-      [[ "$line" =~ ^Status:|^To|^--$ ]] && continue
+      [[ "$line" =~ ^Status:|^To|^--$|^Default:|^New| ]] && continue
+      [[ -z "$line" ]] && continue
       
-      # Извлекаем порт и действие
+      # Формат: "22/tcp ALLOW IN Anywhere" или "3306/tcp ALLOW IN 10.0.0.0/8"
+      # Или: "Anywhere ALLOW IN 192.168.1.0/24" (разрешить всё от подсети)
+      
+      # Извлекаем порт (первый столбец)
       port=$(echo "$line" | awk '{print $1}')
-      action=$(echo "$line" | awk '{print $2}')
       
       # Пропускаем IPv6 дубликаты и некорректные порты
-      [[ "$port" == *"(v6)"* || "$port" == "--" ]] && continue
+      [[ "$port" == *"(v6)"* || "$port" == "--" || "$port" == "Anywhere" ]] && continue
+      
+      # Извлекаем действие и источник
+      action=$(echo "$line" | awk '{print $2}')
+      
+      # Проверяем, есть ли ограничение по IP/подсети
+      source="Anywhere"
+      if echo "$line" | grep -qE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(/[0-9]+)?'; then
+        # Извлекаем IP или подсеть
+        source=$(echo "$line" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(/[0-9]+)?' | tail -1)
+      fi
       
       port_set["$port"]=1
+      rule_source["$port"]="$source"
       
       # Определяем действие (ALLOW/DENY)
       if [[ "$action" == "ALLOW" ]]; then
@@ -112,23 +277,41 @@ parse_rules() {
       fi
     done < <(ufw status | grep -v "^$")
   else
-    # Если UFW выключен, читаем из файлов
-    mapfile -t items < <(
-      grep -hE '^-A ufw6?-user-input.*-(j|g) (ACCEPT|DROP|REJECT)' /etc/ufw/user.rules /etc/ufw/user6.rules |
-      sed -n 's/.*--dports[[:space:]]\+\([0-9,:]\+\).*/\1/p; s/.*--dport[[:space:]]\+\([0-9]\+\).*/\1/p'
-    )
-    
-    for it in "${items[@]}"; do
-      [[ -z $it ]] && continue
-      if [[ $it =~ ^([0-9:]+)/(tcp|udp)$ ]]; then
-        base=${BASH_REMATCH[1]}; proto=${BASH_REMATCH[2]}
-        port_set["$base/$proto"]=1
-        rule_action["$base/$proto"]="ALLOW" # По умолчанию считаем ALLOW
+    # Если UFW выключен, читаем из файлов с поддержкой IP/подсетей
+    while read -r line; do
+      # Извлекаем порт
+      if [[ "$line" =~ --dport[[:space:]]+([0-9]+) ]]; then
+        port="${BASH_REMATCH[1]}"
+      elif [[ "$line" =~ --dports[[:space:]]+([0-9,:]+) ]]; then
+        port="${BASH_REMATCH[1]}"
       else
-        port_set["$it"]=1
-        rule_action["$it"]="ALLOW" # По умолчанию считаем ALLOW
+        continue
       fi
-    done
+      
+      # Определяем протокол
+      proto="tcp"
+      [[ "$line" =~ -p[[:space:]]+(tcp|udp) ]] && proto="${BASH_REMATCH[1]}"
+      
+      # Определяем источник
+      source="Anywhere"
+      if [[ "$line" =~ -s[[:space:]]+([0-9./]+) ]]; then
+        source="${BASH_REMATCH[1]}"
+      fi
+      
+      key="$port/$proto"
+      port_set["$key"]=1
+      rule_source["$key"]="$source"
+      
+      # Определяем действие
+      if [[ "$line" =~ -j[[:space:]]+(ACCEPT|DROP|REJECT) ]]; then
+        case "${BASH_REMATCH[1]}" in
+          ACCEPT) rule_action["$key"]="ALLOW" ;;
+          DROP|REJECT) rule_action["$key"]="DENY" ;;
+        esac
+      else
+        rule_action["$key"]="ALLOW"
+      fi
+    done < <(grep -hE '^-A ufw6?-user-input' /etc/ufw/user.rules /etc/ufw/user6.rules 2>/dev/null || true)
   fi
 }
 
@@ -136,6 +319,13 @@ parse_rules() {
 is_internal() {
   local port=$1
   local service=${service_map[$port]:-""}
+  
+  # Проверяем по списку игнорируемых портов
+  for ignore_port in "${IGNORE_PORTS[@]}"; do
+    if [[ "$port" == "$ignore_port" ]]; then
+      return 0  # true
+    fi
+  done
   
   # Проверяем по списку внутренних портов
   for internal_port in "${INTERNAL_PORTS[@]}"; do
@@ -168,7 +358,17 @@ is_internal() {
 check_used() {
   # ss-прослушивание
   while read -r pr addr proc; do
-    port=${addr##*:}
+    # Извлекаем порт из адреса (поддержка IPv4 и IPv6)
+    # IPv6: [::]:8080 или :::8080 -> 8080
+    # IPv4: 0.0.0.0:8080 или *:8080 -> 8080
+    if [[ "$addr" =~ \]:([0-9]+)$ ]]; then
+      port="${BASH_REMATCH[1]}"
+    elif [[ "$addr" =~ :([0-9]+)$ ]]; then
+      port="${BASH_REMATCH[1]}"
+    else
+      continue
+    fi
+    
     key="$port/$pr"
     used_map["$key"]=1
     
@@ -178,7 +378,7 @@ check_used() {
     # Извлекаем имя сервиса из процесса
     if [[ -n "$proc" ]]; then
       # Извлекаем имя процесса из строки вида "users:(("nginx",pid=1234,fd=3))"
-      service_name=$(echo "$proc" | grep -o '"[^"]*"' | head -1 | tr -d '"')
+      service_name=$(echo "$proc" | grep -oP '"\K[^"]+' | head -1)
       if [[ -z "$service_name" ]]; then
         service_name=$(echo "$proc" | cut -d: -f2 | tr -d '(")')
       fi
@@ -198,35 +398,155 @@ check_used() {
     fi
   done < <(ss -tulnpH | awk '{print tolower($1), $5, $7}')
 
-  # Проверка всех Docker-контейнеров
-  if command -v docker &>/dev/null && docker ps &>/dev/null; then
-    docker ps --format '{{.Names}}' | while read -r container_name; do
+  # Проверка контейнеров: Docker
+  check_docker_containers
+  
+  # Проверка контейнеров: Podman
+  check_podman_containers
+  
+  # Проверка systemd-сервисов (опционально)
+  if [[ "$CHECK_SYSTEMD" == "true" ]]; then
+    check_systemd_services
+  fi
+}
+
+# Проверка Docker-контейнеров
+check_docker_containers() {
+  if ! command -v docker &>/dev/null || ! docker ps &>/dev/null 2>&1; then
+    return 0
+  fi
+  
+  local containers
+  mapfile -t containers < <(docker ps --format '{{.Names}}')
+  
+  for container_name in "${containers[@]}"; do
+    [[ -z "$container_name" ]] && continue
+    
+    local port_mappings
+    mapfile -t port_mappings < <(
       docker inspect "$container_name" \
-        -f '{{range $k,$v := .NetworkSettings.Ports}}{{if $v}}{{printf "%s %s\n" $k (index $v 0).HostPort}}{{end}}{{end}}' |
-      while read -r kp hp; do
-        # kp: containerPort/proto, hp: hostPort
-        [[ -z "$hp" ]] && continue
-        proto=${kp##*/}
-        key="${hp}/${proto}"
-        used_map["$key"]=1
-        used_map["$hp"]=1
-        service_map["$key"]="контейнер: $container_name"
-        service_map["$hp"]="контейнер: $container_name"
-        
-        # Проверяем, открыт ли порт в UFW и не является ли он внутренним
-        if [[ -z "${port_set[$key]:-}" && -z "${port_set[$hp]:-}" ]]; then
-          # Проверяем, не является ли порт внутренним
-          if ! is_internal "$key"; then
-            # Порт используется, не открыт в UFW и не является внутренним
-            missing_ports+=("$key")
-          fi
+        -f '{{range $k,$v := .NetworkSettings.Ports}}{{if $v}}{{printf "%s %s\n" $k (index $v 0).HostPort}}{{end}}{{end}}' 2>/dev/null
+    )
+    
+    for mapping in "${port_mappings[@]}"; do
+      [[ -z "$mapping" ]] && continue
+      read -r kp hp <<< "$mapping"
+      # kp: containerPort/proto, hp: hostPort
+      [[ -z "$hp" ]] && continue
+      proto=${kp##*/}
+      key="${hp}/${proto}"
+      used_map["$key"]=1
+      used_map["$hp"]=1
+      service_map["$key"]="docker: $container_name"
+      service_map["$hp"]="docker: $container_name"
+      
+      # Проверяем, открыт ли порт в UFW и не является ли он внутренним
+      if [[ -z "${port_set[$key]:-}" && -z "${port_set[$hp]:-}" ]]; then
+        if ! is_internal "$key"; then
+          missing_ports+=("$key")
         fi
-      done
+      fi
+    done
+  done
+}
+
+# Проверка Podman-контейнеров
+check_podman_containers() {
+  if ! command -v podman &>/dev/null || ! podman ps &>/dev/null 2>&1; then
+    return 0
+  fi
+  
+  local containers
+  mapfile -t containers < <(podman ps --format '{{.Names}}' 2>/dev/null)
+  
+  for container_name in "${containers[@]}"; do
+    [[ -z "$container_name" ]] && continue
+    
+    # Podman использует похожий формат на Docker
+    local port_mappings
+    mapfile -t port_mappings < <(
+      podman inspect "$container_name" \
+        --format '{{range $k,$v := .NetworkSettings.Ports}}{{if $v}}{{printf "%s %s\n" $k (index $v 0).HostPort}}{{end}}{{end}}' 2>/dev/null
+    )
+    
+    # Если формат не сработал, пробуем альтернативный
+    if [[ ${#port_mappings[@]} -eq 0 ]]; then
+      mapfile -t port_mappings < <(
+        podman port "$container_name" 2>/dev/null | awk -F'[ :/]+' '{print $1"/"$2, $4}'
+      )
+    fi
+    
+    for mapping in "${port_mappings[@]}"; do
+      [[ -z "$mapping" ]] && continue
+      read -r kp hp <<< "$mapping"
+      [[ -z "$hp" ]] && continue
+      proto=${kp##*/}
+      key="${hp}/${proto}"
+      used_map["$key"]=1
+      used_map["$hp"]=1
+      service_map["$key"]="podman: $container_name"
+      service_map["$hp"]="podman: $container_name"
+      
+      if [[ -z "${port_set[$key]:-}" && -z "${port_set[$hp]:-}" ]]; then
+        if ! is_internal "$key"; then
+          missing_ports+=("$key")
+        fi
+      fi
+    done
+  done
+}
+
+# Проверка systemd-сервисов (порты остановленных сервисов)
+check_systemd_services() {
+  echo -e "${CYAN}Проверяем порты systemd-сервисов...${NC}"
+  
+  # Список сервисов, которые обычно слушают порты
+  local common_services=(
+    "nginx:80/tcp,443/tcp"
+    "apache2:80/tcp,443/tcp"
+    "httpd:80/tcp,443/tcp"
+    "mysql:3306/tcp"
+    "mariadb:3306/tcp"
+    "postgresql:5432/tcp"
+    "redis:6379/tcp"
+    "mongodb:27017/tcp"
+    "docker:2375/tcp,2376/tcp"
+    "sshd:22/tcp"
+    "postfix:25/tcp,587/tcp"
+    "dovecot:143/tcp,993/tcp,110/tcp,995/tcp"
+  )
+  
+  for entry in "${common_services[@]}"; do
+    local service_name="${entry%%:*}"
+    local ports="${entry#*:}"
+    
+    # Проверяем, установлен ли сервис
+    if systemctl list-unit-files "${service_name}.service" &>/dev/null; then
+      local status
+      status=$(systemctl is-active "${service_name}.service" 2>/dev/null || echo "unknown")
+      
+      if [[ "$status" == "inactive" ]] || [[ "$status" == "failed" ]]; then
+        # Сервис установлен, но не запущен
+        IFS=',' read -ra port_list <<< "$ports"
+        for p in "${port_list[@]}"; do
+          if [[ -n "${port_set[$p]:-}" ]]; then
+            # Порт открыт в UFW, но сервис не запущен
+            systemd_ports+=("$p (${service_name} - ${status})")
+          fi
+        done
+      fi
+    fi
+  done
+  
+  if [[ ${#systemd_ports[@]} -gt 0 ]]; then
+    echo -e "${YELLOW}⚠ Обнаружены открытые порты для неактивных сервисов:${NC}"
+    for sp in "${systemd_ports[@]}"; do
+      echo -e "  ${YELLOW}• $sp${NC}"
     done
   fi
 }
 
-# 3) Добавление SSH-порта
+# 3) Добавление SSH-порта (только если не открыт)
 add_ssh() {
   local sk port
   for sk in "${!service_map[@]}"; do
@@ -235,26 +555,49 @@ add_ssh() {
       break
     fi
   done
-  if [[ -n ${port:-} ]]; then
-    echo -e "${BLUE}Добавляем SSH-порт (${port}/tcp) в UFW...${NC}"
-    $DRY_RUN || { ufw allow "${port}/tcp" && log "ALLOW ${port}/tcp"; }
+  
+  if [[ -z ${port:-} ]]; then
+    echo -e "${YELLOW}⚠ SSH-порт не обнаружен в списке сервисов${NC}"
+    return 0
+  fi
+  
+  # Проверяем, открыт ли уже SSH-порт в UFW
+  local ssh_key="${port}/tcp"
+  if [[ -n "${port_set[$ssh_key]:-}" ]] || [[ -n "${port_set[$port]:-}" ]]; then
+    echo -e "${GREEN}SSH-порт (${port}/tcp) уже открыт в UFW${NC}"
+    return 0
+  fi
+  
+  echo -e "${BLUE}Добавляем SSH-порт (${port}/tcp) в UFW...${NC}"
+  if $DRY_RUN; then
+    echo "Симуляция: ufw allow ${port}/tcp"
   else
-    echo -e "${RED}⚠ SSH-порт не найден${NC}"; exit 1
+    ufw allow "${port}/tcp" && log "ALLOW ${port}/tcp"
   fi
 }
 
 # 4) Печать таблицы и сбор неиспользуемых
 print_table() {
   echo
-  echo -e "${BOLD}╔═════════════════╦═══════════════╦══════════════════════╗${NC}"
-  echo -e "${BOLD}║ Порт            ║ Статус        ║ Сервис/Контейнер     ║${NC}"
-  echo -e "${BOLD}╠═════════════════╬═══════════════╬══════════════════════╣${NC}"
+  echo -e "${BOLD}╔══════════════════╦═══════════════╦════════════════╦══════════════════════╗${NC}"
+  echo -e "${BOLD}║ Порт             ║ Статус        ║ Источник       ║ Сервис/Контейнер     ║${NC}"
+  echo -e "${BOLD}╠══════════════════╬═══════════════╬════════════════╬══════════════════════╣${NC}"
   
   unused_ports=()
   mapfile -t entries < <(printf "%s\n" "${!port_set[@]}" | sort -V)
   for e in "${entries[@]}"; do
     # Пропускаем некорректные порты
     [[ "$e" == "--" ]] && continue
+    
+    # Пропускаем игнорируемые порты
+    local skip=false
+    for ignore_port in "${IGNORE_PORTS[@]}"; do
+      if [[ "$e" == "$ignore_port" ]]; then
+        skip=true
+        break
+      fi
+    done
+    [[ "$skip" == "true" ]] && continue
     
     used=false
     
@@ -276,6 +619,13 @@ print_table() {
       fi
     fi
     
+    # Источник (IP/подсеть)
+    source="${rule_source[$e]:-Anywhere}"
+    # Сокращаем если слишком длинный
+    if [[ ${#source} -gt 14 ]]; then
+      source="${source:0:11}..."
+    fi
+    
     # сервис/контейнер
     svc=${service_map[$e]:-"-"}
     
@@ -284,17 +634,17 @@ print_table() {
       svc="${BLUE}${svc}${NC}"
     fi
     
-    printf "║ %-15s ║ %-13b ║ %-20b ║\n" "$e" "$status" "$svc"
+    printf "║ %-16s ║ %-23b ║ %-14s ║ %-30b ║\n" "$e" "$status" "$source" "$svc"
   done
-  echo -e "${BOLD}╚═════════════════╩═══════════════╩══════════════════════╝${NC}"
+  echo -e "${BOLD}╚══════════════════╩═══════════════╩════════════════╩══════════════════════╝${NC}"
   
   # Выводим информацию о неоткрытых портах (только внешние)
   if ((${#missing_ports[@]})); then
     echo
     echo -e "${YELLOW}Обнаружены используемые порты, не открытые в UFW:${NC}"
-    echo -e "${BOLD}╔═════════════════╦══════════════════════╗${NC}"
-    echo -e "${BOLD}║ Порт            ║ Сервис/Контейнер     ║${NC}"
-    echo -e "${BOLD}╠═════════════════╬══════════════════════╣${NC}"
+    echo -e "${BOLD}╔══════════════════╦══════════════════════════════╗${NC}"
+    echo -e "${BOLD}║ Порт             ║ Сервис/Контейнер             ║${NC}"
+    echo -e "${BOLD}╠══════════════════╬══════════════════════════════╣${NC}"
     
     # Удаляем дубликаты
     mapfile -t unique_missing < <(printf "%s\n" "${missing_ports[@]}" | sort -u)
@@ -304,9 +654,9 @@ print_table() {
       if [[ $svc != "-" ]]; then
         svc="${BLUE}${svc}${NC}"
       fi
-      printf "║ %-15s ║ %-20b ║\n" "$mp" "$svc"
+      printf "║ %-16s ║ %-38b ║\n" "$mp" "$svc"
     done
-    echo -e "${BOLD}╚═════════════════╩══════════════════════╝${NC}"
+    echo -e "${BOLD}╚══════════════════╩══════════════════════════════╝${NC}"
   fi
 }
 
@@ -439,12 +789,34 @@ cleanup() {
 
 main() {
   ensure_root
-parse_rules
-missing_ports=()
-check_used
+  load_config
+  
+  # Инициализация массивов
+  declare -a unused_ports=()
+  declare -a missing_ports=()
+  declare -a systemd_ports=()
+  
+  echo -e "${CYAN}════════════════════════════════════════════════════════════${NC}"
+  echo -e "${CYAN}  UFW Cleaner v2.0 - Аудит и очистка правил файрвола${NC}"
+  echo -e "${CYAN}════════════════════════════════════════════════════════════${NC}"
+  
+  if $DRY_RUN; then
+    echo -e "${YELLOW}⚠ Режим симуляции (--dry-run) - изменения не будут применены${NC}"
+  fi
+  
+  # Создаём резервную копию перед любыми изменениями
+  if ! $DRY_RUN && $initial_active; then
+    backup_rules
+  fi
+  
+  parse_rules
+  check_used
   add_ssh
   print_table
   cleanup
+  
+  echo
+  echo -e "${GREEN}Готово!${NC}"
 }
 
 main
