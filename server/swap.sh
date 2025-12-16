@@ -163,11 +163,14 @@ update_fstab() {
 # Основная логика
 # ==============================================================================
 
-# Проверка существующего swap-файла
-if grep -q "^${SWAPFILE} " /etc/fstab; then
+# Проверка существующего swap-файла (в fstab ИЛИ активного в системе)
+swap_exists_in_fstab=$(grep -q "^${SWAPFILE} " /etc/fstab && echo "yes" || echo "no")
+swap_is_active=$(grep -q "^${SWAPFILE} " /proc/swaps && echo "yes" || echo "no")
+
+if [[ "$swap_exists_in_fstab" == "yes" ]] || [[ "$swap_is_active" == "yes" ]] || [[ -f "$SWAPFILE" ]]; then
     success_message "Файл подкачки уже существует."
     
-    if grep -q "$SWAPFILE" /proc/swaps; then
+    if [[ "$swap_is_active" == "yes" ]]; then
         currentswapsize_bytes=$(awk -v sf="$SWAPFILE" '$1 == sf {print $3 * 1024}' /proc/swaps)
         success_message "Текущий размер подкачки: $(format_size "$currentswapsize_bytes")"
     fi
