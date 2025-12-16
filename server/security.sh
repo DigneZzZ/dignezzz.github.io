@@ -293,7 +293,6 @@ apply_security_to_included() {
     
     # Если параметр есть в файле — обновляем, если нет — не добавляем (чтобы не засорять)
     if grep -qE "^[#[:space:]]*${param_name}[[:space:]]" "$config_file" 2>/dev/null; then
-      sed -i '' "s|^[#[:space:]]*${param_name}[[:space:]].*|${setting}|" "$config_file" 2>/dev/null || \
       sed -i "s|^[#[:space:]]*${param_name}[[:space:]].*|${setting}|" "$config_file"
     fi
   done
@@ -305,7 +304,6 @@ add_or_update_config() {
   local param_name="${param_value%% *}"
   
   if grep -qE "^[#[:space:]]*${param_name}[[:space:]]" "$SSHD_CONFIG"; then
-    sed -i '' "s|^[#[:space:]]*${param_name}[[:space:]].*|${param_value}|" "$SSHD_CONFIG" 2>/dev/null || \
     sed -i "s|^[#[:space:]]*${param_name}[[:space:]].*|${param_value}|" "$SSHD_CONFIG"
   else
     echo "$param_value" >> "$SSHD_CONFIG"
@@ -356,6 +354,10 @@ get_ssh_service() {
 
 # ==================== Применение настроек безопасности ====================
 apply_security_settings() {
+  # Сохраняем текущий порт SSH (если настроен)
+  local current_port
+  current_port=$(grep -aE '^[[:space:]]*Port[[:space:]]+[0-9]+' "$SSHD_CONFIG" 2>/dev/null | awk '{print $2}' | head -1)
+  
   # Основные настройки безопасности
   local base_settings=(
     "PubkeyAuthentication yes"
@@ -366,6 +368,11 @@ apply_security_settings() {
     "PermitRootLogin prohibit-password"
     "StrictModes yes"
   )
+  
+  # Добавляем порт, если он был настроен
+  if [[ -n "$current_port" ]] && [[ "$current_port" != "22" ]]; then
+    base_settings+=("Port $current_port")
+  fi
   
   for setting in "${base_settings[@]}"; do
     add_or_update_config "$setting"
@@ -547,7 +554,7 @@ main() {
   msg final_warning
   
   local ssh_port
-  ssh_port=$(grep -E '^Port' "$SSHD_CONFIG" | awk '{print $2}')
+  ssh_port=$(grep -aE '^[[:space:]]*Port[[:space:]]' "$SSHD_CONFIG" | awk '{print $2}' | head -1)
   echo -e "${CYAN}SSH порт / SSH port: ${NC}${ssh_port:-22}"
   echo
   echo -e "${CYAN}© GIG.ovh Community - https://gig.ovh${NC}"
