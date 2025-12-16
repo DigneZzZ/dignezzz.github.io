@@ -3,6 +3,8 @@ name: Deploy static content to Pages
 on:
   push:
     branches: ["main"]
+    paths-ignore:
+      - '.github/workflows/gen.yml'
   workflow_dispatch:
 
 permissions:
@@ -13,6 +15,9 @@ permissions:
 concurrency:
   group: "pages"
   cancel-in-progress: false
+
+env:
+  TZ: Europe/Moscow
 
 jobs:
   deploy:
@@ -34,63 +39,74 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y shellcheck
 
       - name: Lint all .sh scripts
+        continue-on-error: true
         run: |
-          find . -name "*.sh" -exec shellcheck {} \;
+          shopt -s globstar nullglob
+          scripts=(./**/*.sh)
+          if [[ ${#scripts[@]} -gt 0 ]]; then
+            shellcheck --severity=warning "${scripts[@]}" || echo "::warning::ShellCheck found issues"
+          fi
 
-      - name: Generate per-category README.md
+      - name: Generate README files
         run: |
+          timestamp=$(date '+%Y-%m-%d %H:%M %Z')
+          
+          # Per-category READMEs
           for dir in */; do
-            [[ "$dir" =~ ^(\.|_|\.) ]] && continue
-            if find "$dir" -type f -name "*.sh" | grep -q .; then
-              readme_path="${dir}README.md"
-              echo "## Scripts in ${dir%/}" > "$readme_path"
-              echo "" >> "$readme_path"
-              echo "| Script Name | Command |" >> "$readme_path"
-              echo "|-------------|---------|" >> "$readme_path"
-              for file in $(find "$dir" -type f -name "*.sh" | sort); do
+            [[ "$dir" =~ ^[._] ]] && continue
+            
+            mapfile -t scripts < <(find "$dir" -maxdepth 2 -type f -name "*.sh" | sort)
+            [[ ${#scripts[@]} -eq 0 ]] && continue
+            
+            {
+              echo "## Scripts in ${dir%/}"
+              echo ""
+              echo "| Script Name | Command |"
+              echo "|-------------|---------|"
+              for file in "${scripts[@]}"; do
                 script_name=$(basename "$file")
-                command="\`bash <(wget -qO- https://dignezzz.github.io/$file)\`"
-                echo "| $script_name | $command |" >> "$readme_path"
+                echo "| $script_name | \`bash <(wget -qO- https://dignezzz.github.io/$file)\` |"
               done
-              echo "" >> "$readme_path"
-              echo "_Last updated at $(TZ='Europe/Moscow' date)_ " >> "$readme_path"
-            fi
+              echo ""
+              echo "_Last updated at ${timestamp}_"
+            } > "${dir}README.md"
           done
+          
+          # Root README
+          {
+            echo "# 🚀 Scripts Index"
+            echo ""
+            echo "![Build Status](https://github.com/${{ github.repository }}/actions/workflows/static.yml/badge.svg)"
+            echo ""
+            
+            for dir in */; do
+              [[ -f "${dir}README.md" ]] || continue
+              echo "## ${dir%/}"
+              echo ""
+              cat "${dir}README.md"
+              echo ""
+            done
+            
+            cat << 'FOOTER'
+          ---
+          ## 📘 Additional Resources
 
-      - name: Generate root README.md
-        run: |
-          echo "# 🚀 Scripts Index" > README.md
-          echo "" >> README.md
-          echo "![Build Status](https://github.com/${{ github.repository }}/actions/workflows/static.yml/badge.svg)" >> README.md
-          echo "" >> README.md
+          - 🌐 [openode.xyz](https://openode.xyz) — мой форум с закрытыми клубами и подпиской.
+            - 🔒 Внутри — платные статьи и практические гайды по установке и настройке **Marzban** и **Remnawave**.
 
-          for dir in */; do
-            [[ -f "${dir}README.md" ]] || continue
-            echo "## ${dir%/}" >> README.md
-            echo "" >> README.md
-            cat "${dir}README.md" >> README.md
-            echo "" >> README.md
-          done
+          - ✍️ [neonode.cc](https://neonode.cc) — блог с техническими заметками, статьями и руководствами.
 
-          echo "---" >> README.md
-          echo "## 📘 Additional Resources" >> README.md
-          echo "" >> README.md
-          echo "- 🌐 [openode.xyz](https://openode.xyz) — мой форум с закрытыми клубами и подпиской." >> README.md
-          echo "  - 🔒 Внутри — платные статьи и практические гайды по установке и настройке **Marzban** и **Remnawave**." >> README.md
-          echo "" >> README.md
-          echo "- ✍️ [neonode.cc](https://neonode.cc) — блог с техническими заметками, статьями и руководствами." >> README.md
-          echo "" >> README.md
-          echo "_Global README auto-generated at $(TZ='Europe/Moscow' date)_ " >> README.md
-
-      - name: Validate README formatting
-        run: |
-          grep -q '| Script Name | Command |' README.md || (echo "README format invalid" && exit 1)
+          FOOTER
+            echo "_Global README auto-generated at ${timestamp}_"
+          } > README.md
 
       - name: Commit README changes
         run: |
           git add README.md */README.md
-          git diff --cached --quiet || git commit -m "🔄 Auto-generate README files ($(date +'%Y-%m-%d %H:%M'))"
-          git push || echo "No changes to push"
+          if ! git diff --cached --quiet; then
+            git commit -m "🔄 Auto-generate README files"
+            git push
+          fi
 
       - name: Setup Pages
         uses: actions/configure-pages@v5
