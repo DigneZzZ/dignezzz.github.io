@@ -53,7 +53,13 @@ backup_file() {
 }
 
 check_root() {
-    [[ "$EUID" -eq 0 ]] || die "Please run the script as root (sudo)."
+    if [[ "$EUID" -ne 0 ]]; then
+        log_error "Please run the script as root (sudo)."
+        echo ""
+        echo -e "${BLUE}Example / Пример:${NC}"
+        echo -e "  wget -qO- https://dignezzz.github.io/server/ssh-port.sh | sudo bash -s -- --port 5322"
+        exit 1
+    fi
 }
 
 detect_os() {
@@ -493,7 +499,7 @@ main() {
     # Интерактивный ввод порта
     if [[ -z "$NEW_PORT" ]] && [[ "$AUTO_YES" -eq 0 ]]; then
         while true; do
-            read -rp "Enter a new port for SSH (1-65535): " NEW_PORT
+            read -rp "Enter a new port for SSH (1-65535): " NEW_PORT </dev/tty
             validate_port "$NEW_PORT" && break
             log_error "Invalid port number. Must be between 1 and 65535."
         done
@@ -539,7 +545,7 @@ main() {
     
     # Удаление старого порта
     if [[ "$AUTO_YES" -eq 0 ]]; then
-        read -rp "Remove old SSH port $current_port from firewall? [y/N]: " answer
+        read -rp "Remove old SSH port $current_port from firewall? [y/N]: " answer </dev/tty
         if [[ "$answer" =~ ^[Yy]$ ]]; then
             remove_old_port_from_firewall "$current_port"
             remove_old_port_from_selinux "$current_port"

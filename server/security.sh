@@ -89,6 +89,9 @@ msg() {
     include_fixed)
       [[ "$LANG_RU" == true ]] && echo -e "${GREEN}Настройки безопасности применены ко всем включённым конфигам.${NC}" \
         || echo -e "${GREEN}Security settings applied to all included configs.${NC}" ;;
+    keys_from_user)
+      [[ "$LANG_RU" == true ]] && echo -e "${YELLOW}Ключи найдены у пользователя:${NC} ${BLUE}${args[0]}${NC}" \
+        || echo -e "${YELLOW}Keys found from user:${NC} ${BLUE}${args[0]}${NC}" ;;
   esac
 }
 
@@ -114,6 +117,9 @@ check_root() {
     # До выбора языка выводим на обоих языках
     log_error "Please run script as root or via sudo."
     log_error "Пожалуйста, запустите скрипт от root или через sudo."
+    echo ""
+    echo -e "${CYAN}Example / Пример:${NC}"
+    echo -e "  wget -qO- https://dignezzz.github.io/server/security.sh | sudo bash"
     exit 1
   fi
 }
@@ -145,7 +151,7 @@ select_language() {
   log_info "Choose language / Выберите язык:"
   echo "1) English"
   echo "2) Русский"
-  read -r -p "[1/2] (default 1): " lang_choice
+  read -r -p "[1/2] (default 1): " lang_choice </dev/tty
   lang_choice=${lang_choice:-1}
   
   [[ "$lang_choice" == "2" ]] && LANG_RU=true || LANG_RU=false
@@ -169,20 +175,11 @@ confirm_changes() {
     log_success "Continue? [Y/n]"
   fi
 
-  read -r answer
+  read -r answer </dev/tty
   answer=${answer:-Y}
   if [[ ! "$answer" =~ ^[Yy]$ ]]; then
     msg cancelled
     exit 0
-  fi
-}
-
-# ==================== Определение путей ====================
-get_authorized_keys_path() {
-  if [[ "$EUID" -eq 0 ]]; then
-    echo "/root/.ssh/authorized_keys"
-  else
-    echo "$HOME/.ssh/authorized_keys"
   fi
 }
 
@@ -206,6 +203,58 @@ validate_ssh_keys() {
   done < "$authorized_keys"
   
   echo "$valid_key_count"
+}
+
+# ==================== Определение путей ====================
+get_authorized_keys_path() {
+  local paths=()
+  
+  # Если запущено через sudo, проверяем оригинального пользователя
+  if [[ -n "${SUDO_USER:-}" && "$SUDO_USER" != "root" ]]; then
+    local sudo_user_home
+    sudo_user_home=$(getent passwd "$SUDO_USER" | cut -d: -f6)
+    if [[ -n "$sudo_user_home" ]]; then
+      paths+=("$sudo_user_home/.ssh/authorized_keys")
+    fi
+  fi
+  
+  # Добавляем стандартные пути
+  if [[ "$EUID" -eq 0 ]]; then
+    paths+=("/root/.ssh/authorized_keys")
+  else
+    paths+=("$HOME/.ssh/authorized_keys")
+  fi
+  
+  # Проверяем домашние директории пользователей с UID >= 1000 (обычные пользователи)
+  while IFS=: read -r username _ uid _ _ home _; do
+    if [[ "$uid" -ge 1000 && "$uid" -lt 65534 && -f "$home/.ssh/authorized_keys" ]]; then
+      # Избегаем дубликатов
+      local already_added=false
+      for p in "${paths[@]}"; do
+        [[ "$p" == "$home/.ssh/authorized_keys" ]] && already_added=true && break
+      done
+      [[ "$already_added" == false ]] && paths+=("$home/.ssh/authorized_keys")
+    fi
+  done < /etc/passwd
+  
+  # Возвращаем первый найденный файл с валидными ключами
+  for path in "${paths[@]}"; do
+    if [[ -s "$path" ]]; then
+      local key_count
+      key_count=$(validate_ssh_keys "$path" 2>/dev/null || echo "0")
+      if [[ "$key_count" -gt 0 ]]; then
+        echo "$path"
+        return 0
+      fi
+    fi
+  done
+  
+  # Если ничего не найдено, возвращаем стандартный путь для root
+  if [[ "$EUID" -eq 0 ]]; then
+    echo "/root/.ssh/authorized_keys"
+  else
+    echo "$HOME/.ssh/authorized_keys"
+  fi
 }
 
 # ==================== Обработка Include директив ====================
@@ -424,6 +473,13 @@ main() {
   
   msg keys_found "$valid_keys"
   msg keys_path "$authorized_keys"
+  
+  # Показываем от какого пользователя взяты ключи (если не root)
+  if [[ "$authorized_keys" != "/root/.ssh/authorized_keys" ]]; then
+    local keys_owner
+    keys_owner=$(stat -c '%U' "$authorized_keys" 2>/dev/null || stat -f '%Su' "$authorized_keys" 2>/dev/null || echo "unknown")
+    msg keys_from_user "$keys_owner"
+  fi
   
   # Создаём резервную копию
   cp "$SSHD_CONFIG" "$CONFIG_BACKUP"
