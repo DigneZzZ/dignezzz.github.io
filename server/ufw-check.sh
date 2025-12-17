@@ -26,6 +26,7 @@ NC='\033[0m' # No Color
 # Список внутренних сервисов, которые не нужно открывать (по умолчанию)
 DEFAULT_INTERNAL_SERVICES=(
   "systemd-resolve"
+  "systemd-network"
   "supervisord"
   "dnsmasq"
   "systemd"
@@ -36,7 +37,9 @@ DEFAULT_INTERNAL_SERVICES=(
   "named"
   "ntpd"
   "sshd"  # SSH уже обрабатывается отдельно
-  "docker-proxy"  # Внутренний механизм Docker - порты определяются через docker inspect
+  "docker-proxy"  # Внутренний механизм Docker
+  "containerd"
+  "dockerd"
 )
 
 # Список внутренних портов, которые не нужно открывать (по умолчанию)
@@ -48,7 +51,9 @@ DEFAULT_INTERNAL_PORTS=(
   "123/udp" # NTP
   "631/tcp" # CUPS
   "631/udp" # CUPS
+  "546/udp" # DHCPv6
   "5353/udp" # mDNS
+  "2019/tcp" # Caddy admin API
 )
 
 # Инициализируем рабочие массивы
@@ -228,12 +233,22 @@ INTERNAL_PORTS=(
 )
 
 # Список высоких портов (эфемерные порты для исходящих соединений)
-# RFC 6335: динамические/эфемерные порты 49152-65535
-is_high_port() {
+# Linux использует 32768-60999 (см. /proc/sys/net/ipv4/ip_local_port_range)
+is_ephemeral_port() {
   local port=$1
+  local proto=${port##*/}
   port=${port%%/*}  # Убираем протокол, если есть
-  if [[ $port =~ ^[0-9]+$ ]] && (( port >= 49152 )); then
-    return 0  # true
+  
+  # Эфемерные UDP порты (WireGuard, VPN и т.д.) - динамические
+  if [[ $port =~ ^[0-9]+$ ]] && (( port >= 32768 && port <= 65535 )); then
+    # Для UDP высоких портов - всегда эфемерные
+    if [[ "$proto" == "udp" ]]; then
+      return 0  # true
+    fi
+    # Для TCP - только выше 49152
+    if [[ "$proto" == "tcp" ]] && (( port >= 49152 )); then
+      return 0  # true
+    fi
   fi
   return 1  # false
 }
@@ -345,7 +360,7 @@ is_internal() {
   done
   
   # Проверяем docker-proxy без известного контейнера
-  if [[ "$service" == *"docker: (внутренний)"* ]]; then
+  if [[ "$service" == *"docker: (внутренний)"* ]] || [[ "$service" == *"docker: (локальный)"* ]]; then
     return 0  # true
   fi
   
@@ -356,8 +371,8 @@ is_internal() {
     fi
   done
   
-  # Проверяем высокие порты (обычно для исходящих соединений)
-  if is_high_port "$port"; then
+  # Проверяем эфемерные порты (динамические UDP, высокие TCP)
+  if is_ephemeral_port "$port"; then
     return 0  # true
   fi
   
@@ -380,6 +395,14 @@ check_used() {
     # Извлекаем порт из адреса (поддержка IPv4 и IPv6)
     # IPv6: [::]:8080 или :::8080 -> 8080
     # IPv4: 0.0.0.0:8080 или *:8080 -> 8080
+    local is_local=false
+    
+    # Проверяем, локальный ли это адрес
+    if [[ "$addr" == 127.0.0.* ]] || [[ "$addr" == "127.0.0.1:"* ]] || \
+       [[ "$addr" == "[::1]:"* ]] || [[ "$addr" == "::1:"* ]]; then
+      is_local=true
+    fi
+    
     if [[ "$addr" =~ \]:([0-9]+)$ ]]; then
       port="${BASH_REMATCH[1]}"
     elif [[ "$addr" =~ :([0-9]+)$ ]]; then
@@ -406,8 +429,14 @@ check_used() {
       if [[ "$service_name" == "docker-proxy" ]]; then
         # Проверяем, есть ли уже информация о контейнере для этого порта
         if [[ -n "${docker_port_map[$port]:-}" ]]; then
-          service_map["$key"]="docker: ${docker_port_map[$port]}"
-          service_map["$port"]="docker: ${docker_port_map[$port]}"
+          # Проверяем, локальный ли это Docker-порт
+          if [[ "${docker_local_map[$port]:-}" == "true" ]]; then
+            service_map["$key"]="docker: ${docker_port_map[$port]} (локальный)"
+            service_map["$port"]="docker: ${docker_port_map[$port]} (локальный)"
+          else
+            service_map["$key"]="docker: ${docker_port_map[$port]}"
+            service_map["$port"]="docker: ${docker_port_map[$port]}"
+          fi
         else
           # docker-proxy без известного контейнера - пропускаем (внутренний)
           service_map["$key"]="docker: (внутренний)"
@@ -416,10 +445,20 @@ check_used() {
       elif [[ -n "$service_name" ]]; then
         # Проверяем, нет ли уже информации о контейнере (она приоритетнее)
         if [[ -z "${service_map[$key]:-}" ]]; then
-          service_map["$key"]="сервис: $service_name"
-          service_map["$port"]="сервис: $service_name"
+          if [[ "$is_local" == "true" ]]; then
+            service_map["$key"]="сервис: $service_name (локальный)"
+            service_map["$port"]="сервис: $service_name (локальный)"
+          else
+            service_map["$key"]="сервис: $service_name"
+            service_map["$port"]="сервис: $service_name"
+          fi
         fi
       fi
+    fi
+    
+    # Пропускаем локальные порты - не добавляем в missing
+    if [[ "$is_local" == "true" ]]; then
+      continue
     fi
     
     # Проверяем, открыт ли порт в UFW и не является ли он внутренним
@@ -440,6 +479,7 @@ check_used() {
 
 # Сбор информации о Docker-портах (вызывается до ss)
 declare -A docker_port_map
+declare -A docker_local_map
 collect_docker_ports() {
   if ! command -v docker &>/dev/null || ! docker ps &>/dev/null 2>&1; then
     return 0
@@ -451,18 +491,27 @@ collect_docker_ports() {
   for container_name in "${containers[@]}"; do
     [[ -z "$container_name" ]] && continue
     
+    # Получаем полную информацию о портах включая IP
     local port_mappings
     mapfile -t port_mappings < <(
       docker inspect "$container_name" \
-        -f '{{range $k,$v := .NetworkSettings.Ports}}{{if $v}}{{printf "%s %s\n" $k (index $v 0).HostPort}}{{end}}{{end}}' 2>/dev/null
+        -f '{{range $k,$v := .NetworkSettings.Ports}}{{if $v}}{{printf "%s %s %s\n" $k (index $v 0).HostIp (index $v 0).HostPort}}{{end}}{{end}}' 2>/dev/null
     )
     
     for mapping in "${port_mappings[@]}"; do
       [[ -z "$mapping" ]] && continue
-      read -r kp hp <<< "$mapping"
+      read -r kp host_ip hp <<< "$mapping"
       [[ -z "$hp" ]] && continue
       proto=${kp##*/}
       key="${hp}/${proto}"
+      
+      # Проверяем, локальный ли это порт
+      local is_local="false"
+      if [[ "$host_ip" == "127.0.0.1" ]] || [[ "$host_ip" == "::1" ]]; then
+        is_local="true"
+        docker_local_map["$hp"]="true"
+        docker_local_map["$key"]="true"
+      fi
       
       # Запоминаем соответствие порт -> контейнер
       docker_port_map["$hp"]="$container_name"
@@ -470,13 +519,26 @@ collect_docker_ports() {
       
       used_map["$key"]=1
       used_map["$hp"]=1
-      service_map["$key"]="docker: $container_name"
-      service_map["$hp"]="docker: $container_name"
+      
+      if [[ "$is_local" == "true" ]]; then
+        service_map["$key"]="docker: $container_name (локальный)"
+        service_map["$hp"]="docker: $container_name (локальный)"
+      else
+        service_map["$key"]="docker: $container_name"
+        service_map["$hp"]="docker: $container_name"
+      fi
+      
+      # Пропускаем локальные порты - не добавляем в missing
+      if [[ "$is_local" == "true" ]]; then
+        continue
+      fi
       
       # Проверяем, открыт ли порт в UFW
       if [[ -z "${port_set[$key]:-}" && -z "${port_set[$hp]:-}" ]]; then
         if ! is_internal "$key"; then
           missing_ports+=("$key")
+        fi
+      fi
         fi
       fi
     done
