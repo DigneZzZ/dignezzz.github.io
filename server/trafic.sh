@@ -5,7 +5,7 @@
 # ============================================================================
 # Description: Simple tc-based traffic limiter for Linux servers
 # Author: DigneZzZ - https://gig.ovh
-# Version: 2025.12.17.9
+# Version: 2025.12.18.1
 # License: MIT
 # ============================================================================
 
@@ -16,7 +16,7 @@ set -u
 # ============================================================================
 # CONSTANTS
 # ============================================================================
-readonly SCRIPT_VERSION="2025.12.17.9"
+readonly SCRIPT_VERSION="2025.12.18.1"
 readonly SCRIPT_NAME="GIG Traffic Limiter"
 readonly REMOTE_URL="https://dignezzz.github.io/server/trafic.sh"
 readonly INSTALL_PATH="/usr/local/bin/trafic"
@@ -153,13 +153,16 @@ install_script() {
 # NETWORK INTERFACE DETECTION
 # ============================================================================
 detect_interfaces() {
-    # Получаем список активных интерфейсов (кроме lo)
-    ip -o link show up | awk -F': ' '{print $2}' | grep -v '^lo$' | sed 's/@.*//'
+    # Получаем список активных интерфейсов (кроме lo и docker/veth)
+    ip -o link show up | awk -F': ' '{print $2}' | grep -v '^lo$' | grep -v '^docker' | grep -v '^veth' | grep -v '^br-' | sed 's/@.*//'
 }
 
 get_default_interface() {
     # Получаем интерфейс по умолчанию (для маршрута 0.0.0.0)
-    ip route show default 2>/dev/null | awk '/default/ {print $5; exit}'
+    # Ищем слово после "dev" - работает для всех форматов:
+    # - default via 192.168.1.1 dev eth0
+    # - default dev venet0 scope link
+    ip route show default 2>/dev/null | sed -n 's/.*dev \([^ ]*\).*/\1/p' | head -1
 }
 
 select_interface() {
@@ -353,6 +356,25 @@ apply_limit() {
     
     check_tc
     
+    # Проверяем, существует ли интерфейс
+    if ! ip link show "$iface" &>/dev/null; then
+        error_exit "Интерфейс $iface не найден"
+    fi
+    
+    # Проверяем тип qdisc - на некоторых виртуализациях (OpenVZ) tc не работает
+    local current_qdisc
+    current_qdisc=$(tc qdisc show dev "$iface" 2>/dev/null | head -1 | awk '{print $2}' || true)
+    
+    if [ "$current_qdisc" = "noqueue" ]; then
+        warning "Интерфейс $iface использует noqueue (виртуальный)"
+        warning "На OpenVZ/контейнерах tc может не работать"
+        read -p "Попробовать всё равно? [y/N]: " try_anyway
+        if [[ ! "$try_anyway" =~ ^[Yy]$ ]]; then
+            info "Отменено"
+            return 1
+        fi
+    fi
+    
     info "Применение ограничения ${rate}Mbit/s на $iface..."
     
     # Удаляем существующие правила
@@ -364,8 +386,14 @@ apply_limit() {
     
     # Добавляем корневую qdisc с htb
     # default 10 означает, что весь трафик без явного фильтра идёт в класс 1:10
-    if ! tc qdisc add dev "$iface" root handle 1: htb default 10 2>/dev/null; then
-        error_exit "Не удалось создать htb qdisc на $iface"
+    if ! tc qdisc add dev "$iface" root handle 1: htb default 10 2>&1; then
+        echo ""
+        warning "Не удалось создать htb qdisc на $iface"
+        warning "Возможные причины:"
+        echo "  • OpenVZ/LXC контейнер без поддержки tc"
+        echo "  • Отсутствуют права на управление сетью"
+        echo "  • Ядро без модуля sch_htb"
+        error_exit "Используйте KVM/bare-metal сервер для tc лимитов"
     fi
     
     # Добавляем класс с ограничением
