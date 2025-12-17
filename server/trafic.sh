@@ -5,7 +5,7 @@
 # ============================================================================
 # Description: Simple tc-based traffic limiter for Linux servers
 # Author: DigneZzZ - https://gig.ovh
-# Version: 2025.12.17.2
+# Version: 2025.12.17.4
 # License: MIT
 # ============================================================================
 
@@ -14,7 +14,7 @@ set -euo pipefail
 # ============================================================================
 # CONSTANTS
 # ============================================================================
-readonly SCRIPT_VERSION="2025.12.17.2"
+readonly SCRIPT_VERSION="2025.12.17.4"
 readonly SCRIPT_NAME="GIG Traffic Limiter"
 readonly REMOTE_URL="https://dignezzz.github.io/server/trafic.sh"
 readonly INSTALL_PATH="/usr/local/bin/trafic"
@@ -42,11 +42,9 @@ _exists() { command -v "$1" >/dev/null 2>&1; }
 
 print_header() {
     echo ""
-    _bold "=========================================="
-    echo ""
-    _bold "  $1"
-    echo ""
-    _bold "=========================================="
+    echo "$(_bold "==========================================")"
+    echo "$(_bold "  $1")"
+    echo "$(_bold "==========================================")"
     echo ""
 }
 
@@ -196,7 +194,7 @@ select_interface() {
     
     # Показываем список для выбора
     echo ""
-    _bold "Доступные сетевые интерфейсы:"
+    echo "$(_bold "Доступные сетевые интерфейсы:")"
     echo ""
     
     local i=1
@@ -243,9 +241,9 @@ get_current_limit() {
         return
     fi
     
-    # Получаем текущий лимит из class
+    # Получаем текущий лимит из class (совместимый вариант без grep -P)
     local rate
-    rate=$(tc class show dev "$iface" 2>/dev/null | grep "htb 1:10" | grep -oP 'rate \K[0-9]+[KMG]?bit' || true)
+    rate=$(tc class show dev "$iface" 2>/dev/null | grep "htb 1:10" | sed -n 's/.*rate \([0-9]*[KMG]*bit\).*/\1/p' || true)
     
     if [ -n "$rate" ]; then
         echo "$rate"
@@ -256,7 +254,7 @@ get_current_limit() {
 
 show_current_status() {
     echo ""
-    _bold "Текущий статус ограничений:"
+    echo "$(_bold "Текущий статус ограничений:")"
     echo ""
     
     local interfaces
@@ -281,19 +279,24 @@ apply_limit() {
     # Удаляем существующие правила
     tc qdisc del dev "$iface" root 2>/dev/null || true
     
+    # Рассчитываем burst: для стабильной работы ~1-2% от rate или минимум 15k
+    # burst = rate / HZ, где HZ обычно 250-1000. Берём безопасное значение.
+    local burst="64k"
+    
     # Добавляем корневую qdisc с htb
-    if ! tc qdisc add dev "$iface" root handle 1: htb default 10 r2q 1 2>/dev/null; then
+    # default 10 означает, что весь трафик без явного фильтра идёт в класс 1:10
+    if ! tc qdisc add dev "$iface" root handle 1: htb default 10 2>/dev/null; then
         error_exit "Не удалось создать htb qdisc на $iface"
     fi
     
     # Добавляем класс с ограничением
-    if ! tc class add dev "$iface" parent 1: classid 1:10 htb rate "${rate}mbit" ceil "${rate}mbit" burst 15k 2>/dev/null; then
+    # burst и cburst одинаковые для плавной работы без "рваной" скорости
+    if ! tc class add dev "$iface" parent 1: classid 1:10 htb rate "${rate}mbit" ceil "${rate}mbit" burst "$burst" cburst "$burst" 2>/dev/null; then
         tc qdisc del dev "$iface" root 2>/dev/null || true
         error_exit "Не удалось создать класс htb на $iface"
     fi
     
-    # Добавляем фильтр для всего трафика
-    tc filter add dev "$iface" parent 1: protocol all prio 1 u32 match u32 0 0 flowid 1:10 2>/dev/null || true
+    # Фильтр НЕ нужен — default 10 уже направляет весь трафик в класс 1:10
     
     success "Ограничение ${rate}Mbit/s применено на $iface"
 }
@@ -467,7 +470,7 @@ menu_remove_limit() {
 
 menu_show_rules() {
     echo ""
-    _bold "Текущие правила tc:"
+    echo "$(_bold "Текущие правила tc:")"
     echo ""
     
     local interfaces
