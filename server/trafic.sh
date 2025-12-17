@@ -5,7 +5,7 @@
 # ============================================================================
 # Description: Simple tc-based traffic limiter for Linux servers
 # Author: DigneZzZ - https://gig.ovh
-# Version: 2025.12.17.1
+# Version: 2025.12.17.2
 # License: MIT
 # ============================================================================
 
@@ -14,7 +14,7 @@ set -euo pipefail
 # ============================================================================
 # CONSTANTS
 # ============================================================================
-readonly SCRIPT_VERSION="2025.12.17.1"
+readonly SCRIPT_VERSION="2025.12.17.2"
 readonly SCRIPT_NAME="GIG Traffic Limiter"
 readonly REMOTE_URL="https://dignezzz.github.io/server/trafic.sh"
 readonly INSTALL_PATH="/usr/local/bin/trafic"
