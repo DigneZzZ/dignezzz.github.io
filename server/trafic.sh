@@ -5,16 +5,18 @@
 # ============================================================================
 # Description: Simple tc-based traffic limiter for Linux servers
 # Author: DigneZzZ - https://gig.ovh
-# Version: 2025.12.17.4
+# Version: 2025.12.17.8
 # License: MIT
 # ============================================================================
 
-set -euo pipefail
+# Не используем set -e — обрабатываем ошибки явно через || true и error_exit
+# set -u оставляем для защиты от опечаток в переменных
+set -u
 
 # ============================================================================
 # CONSTANTS
 # ============================================================================
-readonly SCRIPT_VERSION="2025.12.17.4"
+readonly SCRIPT_VERSION="2025.12.17.8"
 readonly SCRIPT_NAME="GIG Traffic Limiter"
 readonly REMOTE_URL="https://dignezzz.github.io/server/trafic.sh"
 readonly INSTALL_PATH="/usr/local/bin/trafic"
@@ -232,39 +234,87 @@ check_tc() {
 get_current_limit() {
     local iface="$1"
     
-    # Проверяем наличие htb qdisc
+    # Получаем информацию о qdisc
     local qdisc_info
-    qdisc_info=$(tc qdisc show dev "$iface" 2>/dev/null | grep "htb" || true)
+    qdisc_info=$(tc qdisc show dev "$iface" 2>/dev/null | head -1 || true)
     
     if [ -z "$qdisc_info" ]; then
-        echo "не установлено"
+        echo "нет данных"
         return
     fi
     
-    # Получаем текущий лимит из class (совместимый вариант без grep -P)
-    local rate
-    rate=$(tc class show dev "$iface" 2>/dev/null | grep "htb 1:10" | sed -n 's/.*rate \([0-9]*[KMG]*bit\).*/\1/p' || true)
-    
-    if [ -n "$rate" ]; then
-        echo "$rate"
+    # Проверяем наличие нашего htb лимитера
+    if echo "$qdisc_info" | grep -q "htb"; then
+        # Получаем текущий лимит из class (совместимый вариант без grep -P)
+        local rate
+        rate=$(tc class show dev "$iface" 2>/dev/null | grep "htb 1:10" | sed -n 's/.*rate \([0-9]*[KMG]*bit\).*/\1/p' || true)
+        
+        if [ -n "$rate" ]; then
+            echo "$(_green "⚡ $rate")"
+        else
+            echo "$(_yellow "htb активен")"
+        fi
+    elif echo "$qdisc_info" | grep -q "noqueue"; then
+        echo "$(_blue "noqueue (виртуальный)")"
+    elif echo "$qdisc_info" | grep -q "mq\|fq_codel\|pfifo_fast"; then
+        # Стандартные qdisc без ограничений
+        local qtype
+        qtype=$(echo "$qdisc_info" | awk '{print $2}')
+        echo "без лимита ($qtype)"
     else
-        echo "htb активен (лимит не определён)"
+        # Другой qdisc
+        local qtype
+        qtype=$(echo "$qdisc_info" | awk '{print $2}')
+        echo "другой ($qtype)"
     fi
 }
 
+is_persistent() {
+    # Проверяем наличие и активность systemd сервиса
+    if [ -f /etc/systemd/system/trafic-limiter.service ]; then
+        if systemctl is-enabled trafic-limiter.service &>/dev/null; then
+            echo "постоянное"
+            return 0
+        fi
+    fi
+    echo "временное"
+    return 1
+}
+
 show_current_status() {
-    echo ""
-    echo "$(_bold "Текущий статус ограничений:")"
+    echo "$(_bold "📊 Текущий статус:")"
     echo ""
     
     local interfaces
     interfaces=$(detect_interfaces)
     
+    # Проверяем, есть ли хоть один лимит htb
+    local has_limit=false
+    local persistence=""
+    
     while IFS= read -r iface; do
         local limit
         limit=$(get_current_limit "$iface")
-        printf "  %-15s : %s\n" "$iface" "$limit"
+        
+        # Проверяем наличие htb (нашего лимитера)
+        if tc qdisc show dev "$iface" 2>/dev/null | grep -q "htb"; then
+            has_limit=true
+        fi
+        
+        printf "   %-12s → %s\n" "$iface" "$limit"
     done <<< "$interfaces"
+    
+    # Показываем тип ограничения если есть лимит
+    if [ "$has_limit" = true ]; then
+        persistence=$(is_persistent)
+        if [ "$persistence" = "постоянное" ]; then
+            echo ""
+            echo "   $(_green "🔒") Режим: $(_green "постоянное") (systemd)"
+        else
+            echo ""
+            echo "   $(_yellow "⏱️") Режим: $(_yellow "временное") (до перезагрузки)"
+        fi
+    fi
     echo ""
 }
 
@@ -401,30 +451,39 @@ remove_systemd_service() {
 # ============================================================================
 show_menu() {
     clear
-    print_header "$SCRIPT_NAME v$SCRIPT_VERSION"
     
+    # Заголовок
+    echo ""
+    echo "$(_bold "⚡ GIG Traffic Limiter") $(_blue "v$SCRIPT_VERSION")"
+    echo "$(_green "   https://gig.ovh") — by DigneZzZ"
+    echo ""
+    
+    # Проверка обновлений
     check_updates
     
-    echo "  Автор: DigneZzZ - https://gig.ovh"
-    echo ""
-    
+    # Статус
     show_current_status
     
-    echo "────────────────────────────────────────────"
+    # Разделитель
+    echo "─────────────────────────────────────────"
     echo ""
-    echo "  1) Установить ограничение скорости"
-    echo "  2) Удалить ограничение"
-    echo "  3) Показать текущие правила tc"
-    echo "  4) Сделать ограничение постоянным (systemd)"
-    echo "  5) Удалить постоянное ограничение"
+    
+    # Меню
+    echo "  $(_green "1)")  Установить ограничение скорости"
+    echo "  $(_yellow "2)")  Удалить ограничение"
+    echo "  $(_blue "3)")  Показать правила tc"
     echo ""
-    echo "  u) Обновить скрипт"
-    echo "  h) Справка"
-    echo "  0) Выход"
+    echo "  $(_green "4)")  Сделать постоянным (systemd)"
+    echo "  $(_yellow "5)")  Удалить постоянное ограничение"
     echo ""
-    echo "────────────────────────────────────────────"
+    echo "  $(_blue "u)")  Обновить скрипт"
+    echo "  $(_blue "h)")  Справка"
+    echo "  $(_red "0)")  Выход"
     echo ""
-    read -p "Выберите действие: " choice
+    echo "─────────────────────────────────────────"
+    echo ""
+    
+    read -p "👉 Выбор: " choice
     
     case "$choice" in
         1) menu_set_limit ;;
@@ -434,7 +493,7 @@ show_menu() {
         5) menu_remove_persistent ;;
         u|U) do_update ;;
         h|H) show_help; read -p "Нажмите Enter для продолжения..." ;;
-        0|q|Q) exit 0 ;;
+        0|q|Q) echo ""; success "До свидания!"; exit 0 ;;
         *) warning "Неверный выбор" ;;
     esac
 }
