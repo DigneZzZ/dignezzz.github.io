@@ -5,7 +5,7 @@
 # ============================================================================
 # Description: Simple tc-based traffic limiter for Linux servers
 # Author: DigneZzZ - https://gig.ovh
-# Version: 2025.12.17.8
+# Version: 2025.12.17.9
 # License: MIT
 # ============================================================================
 
@@ -16,7 +16,7 @@ set -u
 # ============================================================================
 # CONSTANTS
 # ============================================================================
-readonly SCRIPT_VERSION="2025.12.17.8"
+readonly SCRIPT_VERSION="2025.12.17.9"
 readonly SCRIPT_NAME="GIG Traffic Limiter"
 readonly REMOTE_URL="https://dignezzz.github.io/server/trafic.sh"
 readonly INSTALL_PATH="/usr/local/bin/trafic"
@@ -270,15 +270,37 @@ get_current_limit() {
 }
 
 is_persistent() {
+    local iface="${1:-}"
+    local current_rate="${2:-}"
+    
     # Проверяем наличие и активность systemd сервиса
-    if [ -f /etc/systemd/system/trafic-limiter.service ]; then
-        if systemctl is-enabled trafic-limiter.service &>/dev/null; then
+    if [ ! -f /etc/systemd/system/trafic-limiter.service ]; then
+        echo "временное"
+        return 1
+    fi
+    
+    if ! systemctl is-enabled trafic-limiter.service &>/dev/null; then
+        echo "временное"
+        return 1
+    fi
+    
+    # Проверяем, совпадают ли настройки в сервисе с текущими
+    if [ -n "$iface" ] && [ -n "$current_rate" ]; then
+        local service_line
+        service_line=$(grep "ExecStart=" /etc/systemd/system/trafic-limiter.service 2>/dev/null || true)
+        
+        # Извлекаем интерфейс и rate из сервиса
+        if echo "$service_line" | grep -q "$iface" && echo "$service_line" | grep -q "$current_rate"; then
             echo "постоянное"
             return 0
+        else
+            echo "временное*"  # Сервис есть, но с другими настройками
+            return 1
         fi
     fi
-    echo "временное"
-    return 1
+    
+    echo "постоянное"
+    return 0
 }
 
 show_current_status() {
@@ -290,7 +312,8 @@ show_current_status() {
     
     # Проверяем, есть ли хоть один лимит htb
     local has_limit=false
-    local persistence=""
+    local limit_iface=""
+    local limit_rate=""
     
     while IFS= read -r iface; do
         local limit
@@ -299,6 +322,9 @@ show_current_status() {
         # Проверяем наличие htb (нашего лимитера)
         if tc qdisc show dev "$iface" 2>/dev/null | grep -q "htb"; then
             has_limit=true
+            limit_iface="$iface"
+            # Извлекаем числовое значение rate (например, 100 из 100Mbit)
+            limit_rate=$(tc class show dev "$iface" 2>/dev/null | grep "htb 1:10" | sed -n 's/.*rate \([0-9]*\)[KMG]*bit.*/\1/p' || true)
         fi
         
         printf "   %-12s → %s\n" "$iface" "$limit"
@@ -306,12 +332,15 @@ show_current_status() {
     
     # Показываем тип ограничения если есть лимит
     if [ "$has_limit" = true ]; then
-        persistence=$(is_persistent)
+        local persistence
+        persistence=$(is_persistent "$limit_iface" "$limit_rate")
+        
+        echo ""
         if [ "$persistence" = "постоянное" ]; then
-            echo ""
             echo "   $(_green "🔒") Режим: $(_green "постоянное") (systemd)"
+        elif [ "$persistence" = "временное*" ]; then
+            echo "   $(_yellow "⏱️") Режим: $(_yellow "временное") (сервис с другими настройками)"
         else
-            echo ""
             echo "   $(_yellow "⏱️") Режим: $(_yellow "временное") (до перезагрузки)"
         fi
     fi
