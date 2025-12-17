@@ -129,12 +129,24 @@ install_script() {
     
     info "Установка $SCRIPT_NAME в $INSTALL_PATH..."
     
-    # Копируем скрипт
-    cp "$0" "$INSTALL_PATH"
-    chmod +x "$INSTALL_PATH"
-    
-    success "Установлено: $INSTALL_PATH"
-    info "Теперь можете использовать команду: trafic"
+    # Проверяем, запущен ли скрипт через pipe (bash <(wget ...))
+    if [ ! -f "$0" ] || [ "$0" = "bash" ] || [[ "$0" == /dev/* ]] || [[ "$0" == /proc/* ]]; then
+        # Скачиваем скрипт напрямую
+        info "Загрузка скрипта с $REMOTE_URL..."
+        if curl -fsSL "$REMOTE_URL" -o "$INSTALL_PATH" 2>/dev/null; then
+            chmod +x "$INSTALL_PATH"
+            success "Установлено: $INSTALL_PATH"
+            info "Теперь можете использовать команду: trafic"
+        else
+            error_exit "Не удалось загрузить скрипт"
+        fi
+    else
+        # Копируем локальный файл
+        cp "$0" "$INSTALL_PATH"
+        chmod +x "$INSTALL_PATH"
+        success "Установлено: $INSTALL_PATH"
+        info "Теперь можете использовать команду: trafic"
+    fi
 }
 
 # ============================================================================
