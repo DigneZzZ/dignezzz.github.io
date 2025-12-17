@@ -241,21 +241,26 @@ is_high_port() {
 # 1) Извлечение портов из UFW или из файлов
 parse_rules() {
   if $initial_active; then
-    # Получаем полный список правил из ufw status verbose для лучшего парсинга
+    # Получаем полный список правил из ufw status
     while read -r line; do
-      [[ "$line" =~ ^Status:|^To|^--$|^Default:|^New| ]] && continue
+      # Пропускаем заголовки и пустые строки
+      [[ "$line" =~ ^Status:|^To|^--$|^Default:|^New|^Logging ]] && continue
       [[ -z "$line" ]] && continue
       
-      # Формат: "22/tcp ALLOW IN Anywhere" или "3306/tcp ALLOW IN 10.0.0.0/8"
-      # Или: "Anywhere ALLOW IN 192.168.1.0/24" (разрешить всё от подсети)
+      # Пропускаем IPv6 правила (содержат "(v6)" в конце строки)
+      [[ "$line" == *"(v6)"* ]] && continue
+      
+      # Формат: "22/tcp                   ALLOW       Anywhere"
+      #         "443                      ALLOW       Anywhere"
+      #         "45876/tcp                ALLOW       87.228.16.152"
       
       # Извлекаем порт (первый столбец)
       port=$(echo "$line" | awk '{print $1}')
       
-      # Пропускаем IPv6 дубликаты и некорректные порты
-      [[ "$port" == *"(v6)"* || "$port" == "--" || "$port" == "Anywhere" ]] && continue
+      # Пропускаем некорректные порты
+      [[ -z "$port" || "$port" == "--" || "$port" == "Anywhere" ]] && continue
       
-      # Извлекаем действие и источник
+      # Извлекаем действие (второй столбец)
       action=$(echo "$line" | awk '{print $2}')
       
       # Проверяем, есть ли ограничение по IP/подсети
@@ -267,15 +272,18 @@ parse_rules() {
       
       port_set["$port"]=1
       rule_source["$port"]="$source"
+      rule_action["$port"]="${action:-ALLOW}"
       
-      # Определяем действие (ALLOW/DENY)
-      if [[ "$action" == "ALLOW" ]]; then
-        rule_action["$port"]="ALLOW"
-      elif [[ "$action" == "DENY" ]]; then
-        rule_action["$port"]="DENY"
-      else
-        rule_action["$port"]="ALLOW" # По умолчанию
+      # Если порт без протокола (например "443"), добавляем также с tcp и udp
+      if [[ ! "$port" =~ / ]]; then
+        port_set["${port}/tcp"]=1
+        port_set["${port}/udp"]=1
+        rule_source["${port}/tcp"]="$source"
+        rule_source["${port}/udp"]="$source"
+        rule_action["${port}/tcp"]="${action:-ALLOW}"
+        rule_action["${port}/udp"]="${action:-ALLOW}"
       fi
+      
     done < <(ufw status | grep -v "^$")
   else
     # Если UFW выключен, читаем из файлов с поддержкой IP/подсетей
@@ -612,7 +620,17 @@ print_table() {
   echo -e "${BOLD}╠══════════════════╬═══════════════╬════════════════╬══════════════════════╣${NC}"
   
   unused_ports=()
-  mapfile -t entries < <(printf "%s\n" "${!port_set[@]}" | sort -V)
+  
+  # Собираем "оригинальные" порты (как они заданы в UFW, без синтетических /tcp /udp)
+  declare -A original_ports
+  while read -r line; do
+    [[ "$line" =~ ^Status:|^To|^--$|^Default:|^New|^Logging ]] && continue
+    [[ -z "$line" || "$line" == *"(v6)"* ]] && continue
+    port=$(echo "$line" | awk '{print $1}')
+    [[ -n "$port" && "$port" != "--" && "$port" != "Anywhere" ]] && original_ports["$port"]=1
+  done < <(ufw status 2>/dev/null)
+  
+  mapfile -t entries < <(printf "%s\n" "${!original_ports[@]}" | sort -V)
   for e in "${entries[@]}"; do
     # Пропускаем пустые и некорректные порты
     [[ -z "$e" || "$e" == "--" ]] && continue
@@ -630,8 +648,14 @@ print_table() {
     used=false
     
     # Проверяем, используется ли порт
+    # Для портов без протокола (например "443") проверяем и tcp и udp
     if [[ -n "${used_map["$e"]:-}" ]]; then
       used=true
+    elif [[ ! "$e" =~ / ]]; then
+      # Порт без протокола - проверяем с tcp и udp
+      if [[ -n "${used_map["${e}/tcp"]:-}" ]] || [[ -n "${used_map["${e}/udp"]:-}" ]]; then
+        used=true
+      fi
     fi
     
     # Определяем статус
@@ -654,8 +678,13 @@ print_table() {
       source="${source:0:11}..."
     fi
     
-    # сервис/контейнер
-    svc="${service_map["$e"]:-"-"}"
+    # сервис/контейнер - также проверяем с протоколом
+    svc="${service_map["$e"]:-}"
+    if [[ -z "$svc" && ! "$e" =~ / ]]; then
+      svc="${service_map["${e}/tcp"]:-}"
+      [[ -z "$svc" ]] && svc="${service_map["${e}/udp"]:-}"
+    fi
+    [[ -z "$svc" ]] && svc="-"
     
     # Добавляем цвет к сервису
     if [[ $svc != "-" ]]; then
