@@ -16,7 +16,7 @@
 | ufw_main.sh | `bash <(wget -qO- https://dignezzz.github.io/marzban/ufw_main.sh)` |
 | ufw_node.sh | `bash <(wget -qO- https://dignezzz.github.io/marzban/ufw_node.sh)` |
 
-_Last updated at 2025-12-17 12:39 MSK_
+_Last updated at 2025-12-17 14:38 MSK_
 
 ## server
 
@@ -45,7 +45,7 @@ _Last updated at 2025-12-17 12:39 MSK_
 | ufw-copy.sh | `bash <(wget -qO- https://dignezzz.github.io/server/ufw-copy.sh)` |
 | unlimit_server.sh | `bash <(wget -qO- https://dignezzz.github.io/server/unlimit_server.sh)` |
 
-_Last updated at 2025-12-17 12:39 MSK_
+_Last updated at 2025-12-17 14:38 MSK_
 
 ## shm
 
@@ -55,7 +55,7 @@ _Last updated at 2025-12-17 12:39 MSK_
 |-------------|---------|
 | backup.sh | `bash <(wget -qO- https://dignezzz.github.io/shm/backup/backup.sh)` |
 
-_Last updated at 2025-12-17 12:39 MSK_
+_Last updated at 2025-12-17 14:38 MSK_
 
 ---
 ## 📘 Additional Resources
@@ -65,4 +65,4 @@ _Last updated at 2025-12-17 12:39 MSK_
 
 - ✍️ [neonode.cc](https://neonode.cc) — блог с техническими заметками, статьями и руководствами.
 
-_Global README auto-generated at 2025-12-17 12:39 MSK_
+_Global README auto-generated at 2025-12-17 14:38 MSK_
