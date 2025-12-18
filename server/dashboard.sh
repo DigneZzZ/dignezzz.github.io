@@ -1087,31 +1087,28 @@ fi
 
 # IP адреса (только если включено) - с кэшированием Public IP на 1 час
 if [ "$SHOW_IP" = true ]; then
-    # Получаем основной IPv4 с реального интерфейса (не Docker, не loopback)
-    # Приоритет: eth0, ens*, enp* — исключаем docker0, br-*, veth*, lo
-    ip_local=$(ip -4 addr show 2>/dev/null | grep -v -E 'docker|br-|veth|lo:' | grep 'inet ' | grep -v '127.0.0.1' | head -1 | awk '{print $2}' | cut -d/ -f1)
-    [ -z "$ip_local" ] && ip_local=$(hostname -I 2>/dev/null | awk '{print $1}')
-    [ -z "$ip_local" ] && ip_local="n/a"
-    
     # Кэшируем Public IP на 1 ЧАС (принудительно IPv4)
     cache_file="/tmp/motd-public-ip"
     if cache_valid "$cache_file" 3600; then
         ip_public=$(cat "$cache_file" 2>/dev/null)
     else
-        if [ "$MOTD_FAST_MODE" = true ]; then
-            ip_public=$(cat "$cache_file" 2>/dev/null || echo "n/a")
-        else
-            # Используем -4 для принудительного IPv4
-            ip_public=$(timeout 2 curl -4 -s --connect-timeout 2 ifconfig.me 2>/dev/null || \
-                        timeout 2 curl -4 -s --connect-timeout 2 icanhazip.com 2>/dev/null || \
-                        echo "n/a")
-            [ -n "$ip_public" ] && [ "$ip_public" != "n/a" ] && echo "$ip_public" > "$cache_file" 2>/dev/null
+        # Запрашиваем Public IP
+        ip_public=$(timeout 2 curl -4 -s --connect-timeout 2 ifconfig.me 2>/dev/null)
+        # Если ifconfig.me не ответил — пробуем альтернативы
+        [ -z "$ip_public" ] && ip_public=$(timeout 2 curl -4 -s --connect-timeout 2 icanhazip.com 2>/dev/null)
+        [ -z "$ip_public" ] && ip_public=$(timeout 2 curl -4 -s --connect-timeout 2 api.ipify.org 2>/dev/null)
+        # Если все сервисы недоступны — берём IP с основного интерфейса
+        if [ -z "$ip_public" ]; then
+            ip_public=$(ip -4 addr show 2>/dev/null | grep -v -E 'docker|br-|veth|lo:' | grep 'inet ' | grep -v '127.0.0.1' | head -1 | awk '{print $2}' | cut -d/ -f1)
         fi
+        [ -z "$ip_public" ] && ip_public="n/a"
+        # Сохраняем в кэш
+        [ "$ip_public" != "n/a" ] && echo "$ip_public" > "$cache_file" 2>/dev/null
     fi
     
     # IPv6 global (первый глобальный, не link-local)
     ip6=$(ip -6 addr show scope global 2>/dev/null | awk '/inet6/{print $2; exit}' | cut -d/ -f1)
-    [ -z "$ip6" ] && ip6="n/a"
+    [ -z "$ip6" ] && ip6=""
 fi
 
 # Top процессы (только если включено)
@@ -1542,7 +1539,12 @@ print_section() {
       echo " $disk_data"
       ;;
     net)          print_row "Net Traffic" "$traffic" ;;
-    ip)           print_row "IPv4/IPv6" "Local: $ip_local / Public: $ip_public / IPv6: $ip6" ;;
+    ip)
+      # Формируем строку IP: показываем IPv4 и IPv6 (если есть)
+      local ip_str="$ip_public"
+      [ -n "$ip6" ] && [ "$ip6" != "n/a" ] && ip_str="$ip_str / $ip6"
+      print_row "IP Address" "$ip_str"
+      ;;
     top_processes)
       print_row "Top CPU" "$top_cpu"
       print_row "Top RAM" "$top_mem"
