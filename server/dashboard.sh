@@ -846,7 +846,7 @@ fi
 cat > "$TMP_FILE" << 'EOF'
 #!/bin/bash
 
-CURRENT_VERSION="2025.12.18.1"
+CURRENT_VERSION="2025.12.18.2"
 REMOTE_URL="https://dignezzz.github.io/server/dashboard.sh"
 CONFIG_GLOBAL="/etc/motdrc"
 
