@@ -5,7 +5,7 @@
 # ============================================================================
 # Description: Modern, configurable MOTD dashboard for Linux servers
 # Author: DigneZzZ - https://gig.ovh
-# Version: 2025.12.18.2
+# Version: 2025.12.18.3
 # License: MIT
 # ============================================================================
 
@@ -14,7 +14,7 @@ set -euo pipefail  # Exit on error, undefined variable, pipe failure
 # ============================================================================
 # CONSTANTS
 # ============================================================================
-readonly SCRIPT_VERSION="2025.12.18.2"
+readonly SCRIPT_VERSION="2025.12.18.3"
 readonly SCRIPT_NAME="GIG MOTD Dashboard"
 readonly REMOTE_URL="https://dignezzz.github.io/server/dashboard.sh"
 
@@ -846,7 +846,7 @@ fi
 cat > "$TMP_FILE" << 'EOF'
 #!/bin/bash
 
-CURRENT_VERSION="2025.12.18.2"
+CURRENT_VERSION="2025.12.18.3"
 REMOTE_URL="https://dignezzz.github.io/server/dashboard.sh"
 CONFIG_GLOBAL="/etc/motdrc"
 
