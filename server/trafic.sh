@@ -16,7 +16,7 @@ set -u
 # ============================================================================
 # CONSTANTS
 # ============================================================================
-readonly SCRIPT_VERSION="2025.12.18.1"
+readonly SCRIPT_VERSION="2025.12.19.1"
 readonly SCRIPT_NAME="GIG Traffic Limiter"
 readonly REMOTE_URL="https://dignezzz.github.io/server/trafic.sh"
 readonly INSTALL_PATH="/usr/local/bin/trafic"
@@ -380,10 +380,6 @@ apply_limit() {
     # Удаляем существующие правила
     tc qdisc del dev "$iface" root 2>/dev/null || true
     
-    # Рассчитываем burst: для стабильной работы ~1-2% от rate или минимум 15k
-    # burst = rate / HZ, где HZ обычно 250-1000. Берём безопасное значение.
-    local burst="64k"
-    
     # Добавляем корневую qdisc с htb
     # default 10 означает, что весь трафик без явного фильтра идёт в класс 1:10
     if ! tc qdisc add dev "$iface" root handle 1: htb default 10 2>&1; then
@@ -397,8 +393,8 @@ apply_limit() {
     fi
     
     # Добавляем класс с ограничением
-    # burst и cburst одинаковые для плавной работы без "рваной" скорости
-    if ! tc class add dev "$iface" parent 1: classid 1:10 htb rate "${rate}mbit" ceil "${rate}mbit" burst "$burst" cburst "$burst" 2>/dev/null; then
+    # burst/cburst не указываем — ядро рассчитает оптимальные значения автоматически
+    if ! tc class add dev "$iface" parent 1: classid 1:10 htb rate "${rate}mbit" ceil "${rate}mbit" 2>/dev/null; then
         tc qdisc del dev "$iface" root 2>/dev/null || true
         error_exit "Не удалось создать класс htb на $iface"
     fi
