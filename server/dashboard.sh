@@ -1077,8 +1077,12 @@ fi
 # vnstat --oneline поля: 1=version, 2=iface, 3=today_date, 4=rx_today, 5=tx_today, 6=total_today, 7=rate_today
 #                        8=month_date, 9=rx_month, 10=tx_month, 11=total_month, 12=rate_month
 #                        13=rx_all, 14=tx_all, 15=total_all
+# Цвета: Cyan=36 для дня, Yellow=33 для месяца
 if [ "$SHOW_NET" = true ]; then
-    traffic=$(vnstat --oneline 2>/dev/null | awk -F\; '{print "Day: " $4 " / " $5 " || Month: " $9 " / " $10}')
+    traffic=$(vnstat --oneline 2>/dev/null | awk -F\; '{
+        cyan="\033[0;36m"; yellow="\033[0;33m"; nc="\033[0m";
+        print cyan "Day: " $4 " / " $5 nc " │ " yellow "Month: " $9 " / " $10 nc
+    }')
 fi
 
 # IP адреса (только если включено) - с кэшированием Public IP на 1 час
