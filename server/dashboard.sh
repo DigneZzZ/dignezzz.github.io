@@ -5,7 +5,7 @@
 # ============================================================================
 # Description: Modern, configurable MOTD dashboard for Linux servers
 # Author: DigneZzZ - https://gig.ovh
-# Version: 2025.12.16.1
+# Version: 2025.12.18.1
 # License: MIT
 # ============================================================================
 
@@ -14,7 +14,7 @@ set -euo pipefail  # Exit on error, undefined variable, pipe failure
 # ============================================================================
 # CONSTANTS
 # ============================================================================
-readonly SCRIPT_VERSION="2025.12.16.1"
+readonly SCRIPT_VERSION="2025.12.18.1"
 readonly SCRIPT_NAME="GIG MOTD Dashboard"
 readonly REMOTE_URL="https://dignezzz.github.io/server/dashboard.sh"
 
@@ -367,6 +367,21 @@ OPTIONS=(
 )
 
 # Descriptions for each option
+# Зависимости для опций (пакет => команда для проверки)
+declare -A DEPENDENCIES=(
+  ["SHOW_NET"]="vnstat"
+  ["SHOW_DOCKER"]="docker"
+  ["SHOW_DOCKER_VOLUMES"]="docker"
+  ["SHOW_FAIL2BAN_STATS"]="fail2ban-client"
+)
+
+# Пакеты для установки
+declare -A PACKAGES=(
+  ["vnstat"]="vnstat"
+  ["docker"]="docker.io"
+  ["fail2ban-client"]="fail2ban"
+)
+
 declare -A DESCRIPTIONS=(
   ["SHOW_UPTIME"]="System uptime (days, hours)"
   ["SHOW_LOAD"]="Load average (1m, 5m, 15m)"
@@ -378,22 +393,69 @@ declare -A DESCRIPTIONS=(
   ["SHOW_INODES"]="Inodes usage (warns at >80%)"
   ["SHOW_PROCESSES"]="Running/zombie processes count"
   ["SHOW_IO_WAIT"]="Disk I/O wait percentage"
-  ["SHOW_NET"]="Network traffic (RX/TX)"
+  ["SHOW_NET"]="Network traffic RX/TX (требует vnstat)"
   ["SHOW_IP"]="Public and local IP addresses"
   ["SHOW_CONNECTIONS"]="Active network connections (slow)"
   ["SHOW_LAST_LOGIN"]="Last login info (user, IP, time)"
   ["SHOW_FAILED_LOGINS"]="Failed SSH login attempts"
-  ["SHOW_DOCKER"]="Docker containers status"
-  ["SHOW_DOCKER_VOLUMES"]="Docker volumes disk usage"
+  ["SHOW_DOCKER"]="Docker containers status (требует docker)"
+  ["SHOW_DOCKER_VOLUMES"]="Docker volumes disk usage (требует docker)"
   ["SHOW_SERVICES"]="Services status (nginx, mysql, etc.)"
   ["SHOW_SSL_CERTS"]="SSL certificates expiry (warns <30 days)"
   ["SHOW_SSH"]="SSH port and configuration"
   ["SHOW_SECURITY"]="Security settings (root login, etc.)"
   ["SHOW_UPDATES"]="Available system updates"
   ["SHOW_AUTOUPDATES"]="Auto-updates status"
-  ["SHOW_FAIL2BAN_STATS"]="Fail2ban banned IPs count"
+  ["SHOW_FAIL2BAN_STATS"]="Fail2ban banned IPs count (требует fail2ban)"
   ["SHOW_TEMP"]="CPU temperature (if available)"
 )
+
+# Функция проверки зависимости
+check_dependency() {
+  local option="$1"
+  local dep="${DEPENDENCIES[$option]:-}"
+  [ -z "$dep" ] && return 0  # Нет зависимости
+  command -v "$dep" &>/dev/null
+}
+
+# Функция установки зависимости
+install_dependency() {
+  local cmd="$1"
+  local pkg="${PACKAGES[$cmd]:-$cmd}"
+  
+  echo ""
+  if [ "$EUID" -eq 0 ]; then
+    echo "📦 Устанавливаю $pkg..."
+    if command -v apt-get &>/dev/null; then
+      apt-get update -qq && apt-get install -y "$pkg" >/dev/null 2>&1
+    elif command -v dnf &>/dev/null; then
+      dnf install -y "$pkg" >/dev/null 2>&1
+    elif command -v yum &>/dev/null; then
+      yum install -y "$pkg" >/dev/null 2>&1
+    fi
+    
+    if command -v "$cmd" &>/dev/null; then
+      echo "✅ $pkg успешно установлен"
+      # Для vnstat нужно запустить сервис
+      if [ "$cmd" = "vnstat" ]; then
+        systemctl enable vnstat >/dev/null 2>&1 || true
+        systemctl start vnstat >/dev/null 2>&1 || true
+        echo "ℹ️  Статистика трафика начнёт собираться через несколько минут"
+      fi
+      sleep 1
+      return 0
+    else
+      echo "❌ Не удалось установить $pkg"
+      sleep 2
+      return 1
+    fi
+  else
+    echo "⚠️  Для $pkg требуются права root"
+    echo "   Установи вручную: sudo apt install $pkg -y"
+    sleep 2
+    return 1
+  fi
+}
 
 print_menu() {
   echo "🔧 Настройка GIG MOTD"
@@ -436,11 +498,22 @@ configure_blocks() {
     for VAR in "${OPTIONS[@]}"; do
       local status="${settings[$VAR]:-true}"
       local symbol
+      local dep_status=""
       
       if [ "$status" = "true" ]; then
         symbol="[✓]"
       else
         symbol="[ ]"
+      fi
+      
+      # Проверяем статус зависимости
+      local dep="${DEPENDENCIES[$VAR]:-}"
+      if [ -n "$dep" ]; then
+        if command -v "$dep" &>/dev/null; then
+          dep_status=" ✅"
+        else
+          dep_status=" ⚠️ нет $dep"
+        fi
       fi
       
       # Format option name for display
@@ -450,7 +523,7 @@ configure_blocks() {
       # Get description
       local desc="${DESCRIPTIONS[$VAR]}"
       
-      printf "%2d) %s %-20s - %s\n" "$idx" "$symbol" "$display_name" "$desc"
+      printf "%2d) %s %-20s - %s%s\n" "$idx" "$symbol" "$display_name" "$desc" "$dep_status"
       ((idx++))
     done
     
@@ -496,7 +569,24 @@ configure_blocks() {
           if [ "${settings[$var_name]}" = "true" ]; then
             settings[$var_name]="false"
           else
-            settings[$var_name]="true"
+            # Проверяем зависимость перед включением
+            local dep="${DEPENDENCIES[$var_name]:-}"
+            if [ -n "$dep" ] && ! command -v "$dep" &>/dev/null; then
+              echo ""
+              echo "⚠️  Для опции $var_name требуется: $dep"
+              read -p "   Установить сейчас? (y/N): " install_confirm
+              if [[ "$install_confirm" =~ ^[Yy]$ ]]; then
+                if install_dependency "$dep"; then
+                  settings[$var_name]="true"
+                fi
+              else
+                echo "ℹ️  Опция будет включена, но может не работать без $dep"
+                sleep 1
+                settings[$var_name]="true"
+              fi
+            else
+              settings[$var_name]="true"
+            fi
           fi
         fi
         ;;
@@ -661,8 +751,76 @@ if [ "$EUID" -ne 0 ] && [ "$INSTALL_USER_MODE" = false ]; then
 fi
 TMP_FILE=$(mktemp)
 
-# === Проверка зависимостей, если не root ===
+# === Установка/проверка зависимостей ===
+install_dependencies() {
+    local MISSING=()
+    local REQUIRED_CMDS="curl hostname awk grep cut uname df free top ip uptime"
+    local OPTIONAL_CMDS="vnstat"
+    
+    # Проверяем обязательные утилиты
+    for CMD in $REQUIRED_CMDS; do
+        if ! command -v "$CMD" &>/dev/null; then
+            MISSING+=("$CMD")
+        fi
+    done
+    
+    if (( ${#MISSING[@]} )); then
+        echo "❌ Не хватает обязательных утилит: ${MISSING[*]}"
+        if [ "$EUID" -eq 0 ]; then
+            echo "🛠 Попытка автоматической установки..."
+            case "$PACKAGE_MANAGER" in
+                apt)
+                    apt-get update -qq && apt-get install -y curl coreutils net-tools procps iproute2 >/dev/null 2>&1
+                    ;;
+                dnf)
+                    dnf install -y curl coreutils net-tools procps iproute >/dev/null 2>&1
+                    ;;
+                yum)
+                    yum install -y curl coreutils net-tools procps iproute >/dev/null 2>&1
+                    ;;
+            esac
+        else
+            echo "🛠 Пожалуйста, установи их командой (под root):"
+            echo "    sudo apt install curl coreutils net-tools procps iproute2 -y"
+            echo "🔁 После этого снова запусти установку."
+            exit 1
+        fi
+    fi
+    
+    # Проверяем vnstat (опционально, но нужен для Network Traffic)
+    if ! command -v vnstat &>/dev/null; then
+        if [ "$EUID" -eq 0 ]; then
+            info "Устанавливаю vnstat для мониторинга сетевого трафика..."
+            case "$PACKAGE_MANAGER" in
+                apt)
+                    apt-get install -y vnstat >/dev/null 2>&1
+                    ;;
+                dnf)
+                    dnf install -y vnstat >/dev/null 2>&1
+                    ;;
+                yum)
+                    yum install -y vnstat >/dev/null 2>&1
+                    ;;
+            esac
+            
+            # Включаем и запускаем службу vnstat
+            if command -v vnstat &>/dev/null; then
+                systemctl enable vnstat >/dev/null 2>&1 || true
+                systemctl start vnstat >/dev/null 2>&1 || true
+                success "vnstat установлен и запущен"
+                info "Статистика трафика начнёт собираться через несколько минут"
+            else
+                warning "Не удалось установить vnstat. Network Traffic будет недоступен."
+            fi
+        else
+            warning "vnstat не установлен. Network Traffic будет недоступен."
+            echo "    Для установки выполни: sudo apt install vnstat -y"
+        fi
+    fi
+}
+
 if [ "$EUID" -ne 0 ]; then
+    # Для не-root просто проверяем наличие утилит
     MISSING=()
     for CMD in curl hostname awk grep cut uname df free top ip uptime vnstat; do
         if ! command -v "$CMD" &>/dev/null; then
@@ -676,6 +834,9 @@ if [ "$EUID" -ne 0 ]; then
         echo "🔁 После этого снова запусти установку."
         exit 1
     fi
+else
+    # Для root устанавливаем зависимости автоматически
+    install_dependencies
 fi
 
 # === Создание dashboard-файла ===
@@ -685,7 +846,7 @@ fi
 cat > "$TMP_FILE" << 'EOF'
 #!/bin/bash
 
-CURRENT_VERSION="2025.12.16.1"
+CURRENT_VERSION="2025.12.18.1"
 REMOTE_URL="https://dignezzz.github.io/server/dashboard.sh"
 CONFIG_GLOBAL="/etc/motdrc"
 
@@ -913,8 +1074,11 @@ if [ "$SHOW_DISK" = true ]; then
 fi
 
 # Network (только если включено)
+# vnstat --oneline поля: 1=version, 2=iface, 3=today_date, 4=rx_today, 5=tx_today, 6=total_today, 7=rate_today
+#                        8=month_date, 9=rx_month, 10=tx_month, 11=total_month, 12=rate_month
+#                        13=rx_all, 14=tx_all, 15=total_all
 if [ "$SHOW_NET" = true ]; then
-    traffic=$(vnstat --oneline 2>/dev/null | awk -F\; '{print $10 " ↓ / " $11 " ↑"}')
+    traffic=$(vnstat --oneline 2>/dev/null | awk -F\; '{print "Day: " $4 " / " $5 " || Month: " $9 " / " $10}')
 fi
 
 # IP адреса (только если включено) - с кэшированием Public IP на 1 час
