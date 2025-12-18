@@ -5,7 +5,7 @@
 # ============================================================================
 # Description: Modern, configurable MOTD dashboard for Linux servers
 # Author: DigneZzZ - https://gig.ovh
-# Version: 2025.12.18.1
+# Version: 2025.12.18.2
 # License: MIT
 # ============================================================================
 
@@ -14,7 +14,7 @@ set -euo pipefail  # Exit on error, undefined variable, pipe failure
 # ============================================================================
 # CONSTANTS
 # ============================================================================
-readonly SCRIPT_VERSION="2025.12.18.1"
+readonly SCRIPT_VERSION="2025.12.18.2"
 readonly SCRIPT_NAME="GIG MOTD Dashboard"
 readonly REMOTE_URL="https://dignezzz.github.io/server/dashboard.sh"
 
@@ -1087,13 +1087,13 @@ fi
 
 # IP адреса (только если включено) - с кэшированием Public IP на 1 час
 if [ "$SHOW_IP" = true ]; then
-    # Локальный IP (приватный диапазон: 10.x, 172.16-31.x, 192.168.x)
-    ip_local=$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -E '^(10\.|172\.(1[6-9]|2[0-9]|3[01])\.|192\.168\.)' | head -1)
-    # Если нет приватного - берём первый IPv4 (это VPS с публичным IP)
+    # Получаем основной IPv4 с реального интерфейса (не Docker, не loopback)
+    # Приоритет: eth0, ens*, enp* — исключаем docker0, br-*, veth*, lo
+    ip_local=$(ip -4 addr show 2>/dev/null | grep -v -E 'docker|br-|veth|lo:' | grep 'inet ' | grep -v '127.0.0.1' | head -1 | awk '{print $2}' | cut -d/ -f1)
     [ -z "$ip_local" ] && ip_local=$(hostname -I 2>/dev/null | awk '{print $1}')
     [ -z "$ip_local" ] && ip_local="n/a"
     
-    # Кэшируем Public IP на 1 ЧАС
+    # Кэшируем Public IP на 1 ЧАС (принудительно IPv4)
     cache_file="/tmp/motd-public-ip"
     if cache_valid "$cache_file" 3600; then
         ip_public=$(cat "$cache_file" 2>/dev/null)
@@ -1101,12 +1101,15 @@ if [ "$SHOW_IP" = true ]; then
         if [ "$MOTD_FAST_MODE" = true ]; then
             ip_public=$(cat "$cache_file" 2>/dev/null || echo "n/a")
         else
-            ip_public=$(timeout 1 curl -s --connect-timeout 1 ifconfig.me 2>/dev/null || echo "n/a")
+            # Используем -4 для принудительного IPv4
+            ip_public=$(timeout 2 curl -4 -s --connect-timeout 2 ifconfig.me 2>/dev/null || \
+                        timeout 2 curl -4 -s --connect-timeout 2 icanhazip.com 2>/dev/null || \
+                        echo "n/a")
             [ -n "$ip_public" ] && [ "$ip_public" != "n/a" ] && echo "$ip_public" > "$cache_file" 2>/dev/null
         fi
     fi
     
-    # IPv6 global
+    # IPv6 global (первый глобальный, не link-local)
     ip6=$(ip -6 addr show scope global 2>/dev/null | awk '/inet6/{print $2; exit}' | cut -d/ -f1)
     [ -z "$ip6" ] && ip6="n/a"
 fi
