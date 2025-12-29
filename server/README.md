@@ -3,6 +3,7 @@
 | Script Name | Command |
 |-------------|---------|
 | dashboard.sh | `bash <(wget -qO- https://dignezzz.github.io/server/dashboard.sh)` |
+| dedic.sh | `bash <(wget -qO- https://dignezzz.github.io/server/dedic.sh)` |
 | dest.sh | `bash <(wget -qO- https://dignezzz.github.io/server/dest.sh)` |
 | dest2.sh | `bash <(wget -qO- https://dignezzz.github.io/server/dest2.sh)` |
 | f2b-e.sh | `bash <(wget -qO- https://dignezzz.github.io/server/f2b-e.sh)` |
@@ -24,4 +25,4 @@
 | ufw-copy.sh | `bash <(wget -qO- https://dignezzz.github.io/server/ufw-copy.sh)` |
 | unlimit_server.sh | `bash <(wget -qO- https://dignezzz.github.io/server/unlimit_server.sh)` |
 
-_Last updated at 2025-12-24 13:08 MSK_
+_Last updated at 2025-12-29 12:51 MSK_
