@@ -125,4 +125,78 @@ for key in "${TARGET_KEYS[@]}"; do
   if echo "$hits" | grep -qE '^/etc/sysctl\.conf:'; then
     # Check any /etc/sysctl.conf value
     while IFS= read -r h; do
-      val="$(extrac
+      val="$(extract_value_from_line "$h")"
+      if [[ "$val" != "$want" ]]; then
+        warn "Conflict in /etc/sysctl.conf: would override to $val"
+        conflicts=$((conflicts+1))
+        if [[ "$AUTO_FIX" == "1" ]]; then
+          warn "AUTO_FIX=1 enabled: commenting out $key in /etc/sysctl.conf"
+          comment_out_key_in_file "/etc/sysctl.conf" "$key"
+          ok "Commented out $key in /etc/sysctl.conf (backup created)"
+        else
+          warn "Tip: run with AUTO_FIX=1 to auto-comment conflicting line(s)"
+        fi
+      fi
+    done < <(echo "$hits" | awk -F: '$1=="/etc/sysctl.conf"{print}')
+  fi
+
+  echo
+done
+
+hr
+if [[ "$conflicts" -gt 0 ]]; then
+  warn "Detected $conflicts conflict(s). If not fixed, values may be overridden."
+else
+  ok "No blocking conflicts detected."
+fi
+
+# -------------------------------------------------------------------
+
+title "Writing sysctl configuration"
+hr
+cat <<EOF > "$CONF"
+# VPN / VM host tuning (managed)
+net.netfilter.nf_conntrack_max = ${WANT[net.netfilter.nf_conntrack_max]}
+net.ipv4.tcp_orphan_retries = ${WANT[net.ipv4.tcp_orphan_retries]}
+net.ipv4.tcp_fin_timeout = ${WANT[net.ipv4.tcp_fin_timeout]}
+net.ipv4.tcp_tw_reuse = ${WANT[net.ipv4.tcp_tw_reuse]}
+EOF
+ok "Config written to $CONF"
+
+# -------------------------------------------------------------------
+
+title "Applying sysctl settings"
+hr
+sysctl --system >/dev/null
+ok "sysctl reloaded"
+
+# -------------------------------------------------------------------
+
+title "Verifying applied values (runtime)"
+hr
+for key in "${TARGET_KEYS[@]}"; do
+  want="${WANT[$key]}"
+  actual="$(sysctl -n "$key" 2>/dev/null || true)"
+  if [[ -z "$actual" ]]; then
+    fail "$key not readable"
+    continue
+  fi
+  if [[ "$actual" == "$want" ]]; then
+    ok "$key = $actual"
+  else
+    fail "$key = $actual (expected $want)"
+  fi
+done
+
+# -------------------------------------------------------------------
+
+title "Current conntrack usage (after tuning)"
+hr
+kv "Conntrack in use" "$(cat /proc/sys/net/netfilter/nf_conntrack_count)"
+kv "Conntrack limit" "$(cat /proc/sys/net/netfilter/nf_conntrack_max)"
+hr
+
+echo
+echo "Done."
+echo "Tip: if you want auto-fix of conflicts in /etc/sysctl.conf, run:"
+echo "  AUTO_FIX=1 bash <(wget -qO- https://.../this-script.sh)"
