@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Версия скрипта
-SCRIPT_VERSION="3.5.7"
+SCRIPT_VERSION="3.5.8"
 VERSION_CHECK_URL="https://raw.githubusercontent.com/DigneZzZ/dignezzz.github.io/main/server/f2b.sh"
 
 # Константы путей конфигурации
@@ -497,7 +497,30 @@ function get_jail_logpath() {
     fi
   done
   
-  # Проверяем дефолтный backend в [DEFAULT]
+  # ВАЖНО: Если у jail есть свой logpath — это файл, не systemd!
+  # Проверяем logpath ДО проверки дефолтного backend
+  if [ -n "$logpath" ]; then
+    if [ -f "$logpath" ]; then
+      echo "$logpath"
+      return
+    fi
+    # Файл не существует — для sshd это означает systemd
+    if [[ "$jail" =~ ^(sshd|ssh)$ ]]; then
+      echo "systemd"
+      return
+    fi
+    # Для других jail'ов возвращаем путь (покажет ошибку "не найден")
+    echo "$logpath"
+    return
+  fi
+  
+  # Если у jail явно указан backend=systemd
+  if [ "$backend" = "systemd" ]; then
+    echo "systemd"
+    return
+  fi
+  
+  # Проверяем дефолтный backend в [DEFAULT] (только если нет logpath!)
   if [ -z "$backend" ]; then
     for cfg in "$JAIL_LOCAL" /etc/fail2ban/jail.conf; do
       [ -f "$cfg" ] || continue
@@ -511,25 +534,9 @@ function get_jail_logpath() {
     done
   fi
   
-  # Если backend=systemd
+  # Если дефолтный backend=systemd
   if [ "$backend" = "systemd" ]; then
     echo "systemd"
-    return
-  fi
-  
-  # Если logpath найден — проверяем существует ли файл
-  if [ -n "$logpath" ]; then
-    if [ -f "$logpath" ]; then
-      echo "$logpath"
-      return
-    fi
-    # Файл не существует — для sshd это означает systemd
-    if [[ "$jail" =~ ^(sshd|ssh)$ ]]; then
-      echo "systemd"
-      return
-    fi
-    # Для других jail'ов возвращаем путь (покажет ошибку "не найден")
-    echo "$logpath"
     return
   fi
   
