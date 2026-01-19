@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Версия скрипта
-SCRIPT_VERSION="3.1.0"
+SCRIPT_VERSION="3.2.0"
 VERSION_CHECK_URL="https://raw.githubusercontent.com/DigneZzZ/dignezzz.github.io/main/server/f2b.sh"
 
 # Константы путей конфигурации
@@ -434,8 +434,72 @@ function show_jail_stats() {
       status_color="${YELLOW}"
     fi
     
+    # Получаем статус лог-файла
+    local log_status
+    log_status=$(get_jail_log_status "$jail")
+    
     echo -e "${indent}${status_color}${status_icon} ${BOLD}$jail${NC} ${GRAY}│${NC} Попытки: ${YELLOW}${currently_failed:-0}${NC}/${DIM}${total_failed:-0}${NC} ${GRAY}│${NC} Блоки: ${RED}${currently_banned:-0}${NC}/${DIM}${total_banned:-0}${NC}"
+    echo -e "${indent}   ${log_status}"
   fi
+}
+
+# Проверка статуса лог-файла для jail'а
+function get_jail_log_status() {
+  local jail="$1"
+  local logpath=""
+  
+  # Получаем logpath из конфига jail
+  local jail_status=$(fail2ban-client status "$jail" 2>/dev/null)
+  logpath=$(echo "$jail_status" | grep -oP 'File list:\s*\K.*' | tr -d '\t ')
+  
+  # Если не нашли в статусе, ищем в конфигах
+  if [ -z "$logpath" ]; then
+    if [ -f "$JAIL_LOCAL" ]; then
+      logpath=$(grep -A 15 "^\[$jail\]" "$JAIL_LOCAL" 2>/dev/null | grep "^logpath" | head -1 | cut -d'=' -f2 | tr -d ' ')
+    fi
+  fi
+  
+  if [ -z "$logpath" ]; then
+    echo -e "${GRAY}└─ ${DIM}Лог: путь не определён${NC}"
+    return
+  fi
+  
+  # Проверяем существование и читаемость файла
+  if [ ! -e "$logpath" ]; then
+    echo -e "${RED}└─ ${ICON_CROSS} Лог не найден:${NC} ${DIM}$logpath${NC}"
+    return
+  fi
+  
+  if [ ! -r "$logpath" ]; then
+    echo -e "${RED}└─ ${ICON_CROSS} Лог недоступен для чтения:${NC} ${DIM}$logpath${NC}"
+    return
+  fi
+  
+  # Получаем информацию о файле
+  local file_size=$(stat -c%s "$logpath" 2>/dev/null || stat -f%z "$logpath" 2>/dev/null)
+  local file_size_hr=$(numfmt --to=iec-i --suffix=B "$file_size" 2>/dev/null || echo "${file_size}B")
+  local line_count=$(wc -l < "$logpath" 2>/dev/null | tr -d ' ')
+  local last_modified=$(stat -c%Y "$logpath" 2>/dev/null || stat -f%m "$logpath" 2>/dev/null)
+  local now=$(date +%s)
+  local age=$((now - last_modified))
+  
+  # Определяем "свежесть" лога
+  local freshness_icon freshness_text
+  if [ "$age" -lt 300 ]; then
+    freshness_icon="${GREEN}●${NC}"
+    freshness_text="активен"
+  elif [ "$age" -lt 3600 ]; then
+    freshness_icon="${YELLOW}●${NC}"
+    freshness_text="обновлён $(( age / 60 ))м назад"
+  elif [ "$age" -lt 86400 ]; then
+    freshness_icon="${ORANGE}●${NC}"
+    freshness_text="обновлён $(( age / 3600 ))ч назад"
+  else
+    freshness_icon="${RED}●${NC}"
+    freshness_text="неактивен $(( age / 86400 ))д"
+  fi
+  
+  echo -e "${GRAY}└─${NC} ${freshness_icon} ${DIM}$logpath${NC} ${GRAY}(${line_count} строк, ${file_size_hr}, ${freshness_text})${NC}"
 }
 
 function check_ssh_port_consistency_quiet() {
