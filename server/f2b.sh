@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Версия скрипта
-SCRIPT_VERSION="3.5.8"
+SCRIPT_VERSION="3.5.9"
 VERSION_CHECK_URL="https://raw.githubusercontent.com/DigneZzZ/dignezzz.github.io/main/server/f2b.sh"
 
 # Константы путей конфигурации
@@ -1096,7 +1096,12 @@ function show_service_config() {
   
   if [ -f "$JAIL_LOCAL" ]; then
     # Показываем конфигурацию конкретного jail'а
-    awk "/^\[$service\]/,/^\[/{if(/^\[/ && !/^\[$service\]/) exit; print}" "$JAIL_LOCAL"
+    awk -v jail="$service" '
+      BEGIN { in_section=0 }
+      $0 ~ "^\\[" jail "\\]" { in_section=1; print; next }
+      /^\[/ { if (in_section) exit }
+      in_section { print }
+    ' "$JAIL_LOCAL"
   else
     echo -e "${RED}No jail.local configuration found${NC}"
   fi
