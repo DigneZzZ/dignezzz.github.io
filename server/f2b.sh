@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Версия скрипта
-SCRIPT_VERSION="3.5.3"
+SCRIPT_VERSION="3.5.4"
 VERSION_CHECK_URL="https://raw.githubusercontent.com/DigneZzZ/dignezzz.github.io/main/server/f2b.sh"
 
 # Константы путей конфигурации
@@ -465,14 +465,14 @@ function show_jail_stats() {
   fi
 }
 
-# Получить путь к логу для jail'а (стандартные пути + фоллбэк на jail.local)
+# Получить путь к логу для jail'а
 # Возвращает: путь к файлу ИЛИ "systemd" если используется journald
 function get_jail_logpath() {
   local jail="$1"
   local logpath=""
   local backend=""
   
-  # Проверяем backend и logpath в jail.local
+  # Читаем backend и logpath из jail.local для конкретного jail
   if [ -f "$JAIL_LOCAL" ]; then
     backend=$(awk -v jail="$jail" '
       BEGIN { in_section=0 }
@@ -489,70 +489,52 @@ function get_jail_logpath() {
     ' "$JAIL_LOCAL")
   fi
   
-  # Проверяем дефолтный backend в [DEFAULT] секции jail.local или jail.conf
-  if [ -z "$backend" ]; then
-    for cfg in "$JAIL_LOCAL" /etc/fail2ban/jail.conf; do
-      [ -f "$cfg" ] || continue
-      backend=$(awk '
-        BEGIN { in_default=0 }
-        /^\[DEFAULT\]/ { in_default=1; next }
-        /^\[/ { in_default=0 }
-        in_default && /^backend/ { gsub(/^backend[[:space:]]*=[[:space:]]*/, ""); print; exit }
-      ' "$cfg")
-      [ -n "$backend" ] && break
-    done
-  fi
-  
-  # Если backend=systemd, возвращаем специальный маркер
-  if [ "$backend" = "systemd" ]; then
-    echo "systemd"
-    return
-  fi
-  
-  # Если logpath найден в jail.local - используем его
+  # Если у jail'а есть свой logpath — это файл, не systemd
   if [ -n "$logpath" ]; then
     echo "$logpath"
     return
   fi
   
-  # Стандартные пути для известных jail'ов (фоллбэк)
+  # Если у jail'а явно указан backend=systemd
+  if [ "$backend" = "systemd" ]; then
+    echo "systemd"
+    return
+  fi
+  
+  # Стандартные пути для известных jail'ов
   case "$jail" in
     sshd|ssh)
+      # SSH обычно использует systemd на современных системах
       for p in /var/log/auth.log /var/log/secure; do
-        [ -f "$p" ] && { logpath="$p"; break; }
+        [ -f "$p" ] && { echo "$p"; return; }
       done
-      # Если файлы не найдены, возможно systemd
-      [ -z "$logpath" ] && logpath="systemd"
+      # Файлы не найдены — значит systemd
+      echo "systemd"
       ;;
     caddy)
       for p in /var/log/caddy/access.log /var/log/caddy/caddy.log; do
-        [ -f "$p" ] && { logpath="$p"; break; }
+        [ -f "$p" ] && { echo "$p"; return; }
       done
       ;;
     nginx|nginx-*)
       for p in /var/log/nginx/access.log /var/log/nginx/error.log; do
-        [ -f "$p" ] && { logpath="$p"; break; }
+        [ -f "$p" ] && { echo "$p"; return; }
       done
       ;;
     apache|apache-*)
       for p in /var/log/apache2/access.log /var/log/apache2/error.log /var/log/httpd/access_log; do
-        [ -f "$p" ] && { logpath="$p"; break; }
+        [ -f "$p" ] && { echo "$p"; return; }
       done
       ;;
     mysql|mariadb)
       for p in /var/log/mysql/error.log /var/log/mariadb/mariadb.log; do
-        [ -f "$p" ] && { logpath="$p"; break; }
+        [ -f "$p" ] && { echo "$p"; return; }
       done
       ;;
     postfix|postfix-*)
-      [ -f /var/log/mail.log ] && logpath="/var/log/mail.log"
-      ;;
-    dovecot)
-      [ -f /var/log/mail.log ] && logpath="/var/log/mail.log"
+      [ -f /var/log/mail.log ] && { echo "/var/log/mail.log"; return; }
       ;;
   esac
-  
-  echo "$logpath"
 }
 
 # Проверка статуса лог-файла для jail'а (принимает путь к логу)
