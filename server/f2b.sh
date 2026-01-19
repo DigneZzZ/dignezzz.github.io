@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Версия скрипта
-SCRIPT_VERSION="3.3.0"
+SCRIPT_VERSION="3.4.0"
 VERSION_CHECK_URL="https://raw.githubusercontent.com/DigneZzZ/dignezzz.github.io/main/server/f2b.sh"
 
 # Константы путей конфигурации
@@ -229,7 +229,7 @@ function print_header() {
 function check_version() {
   echo -e "${BLUE}${ICON_INFO} Проверка обновлений...${NC}"
   if command -v curl &>/dev/null; then
-    LATEST_VERSION=$(curl -s "$VERSION_CHECK_URL" | grep -o 'SCRIPT_VERSION="[0-9.]*"' | cut -d'"' -f2)
+    LATEST_VERSION=$(curl -s --connect-timeout 3 --max-time 5 "$VERSION_CHECK_URL" 2>/dev/null | grep -o 'SCRIPT_VERSION="[0-9.]*"' | cut -d'"' -f2)
     if [ -n "$LATEST_VERSION" ] && [ "$LATEST_VERSION" != "$SCRIPT_VERSION" ]; then
       echo -e "${GREEN}${ICON_ROCKET} Доступна новая версия: ${BOLD}$LATEST_VERSION${NC}"
       echo -e "${GRAY}   Текущая версия: $SCRIPT_VERSION${NC}"
@@ -318,8 +318,8 @@ function show_statistics() {
   echo -e "${BOLD}${CYAN}${ICON_CHART} СТАТИСТИКА FAIL2BAN${NC}"
   echo ""
   
-  # Автоматическая проверка версии при запуске
-  check_version > /dev/null 2>&1
+  # Фоновая проверка версии (с таймаутом, не блокирует)
+  check_version > /dev/null 2>&1 &
   
   # Проверка статуса сервиса
   if systemctl is-active --quiet fail2ban; then
@@ -434,37 +434,25 @@ function show_jail_stats() {
       status_color="${YELLOW}"
     fi
     
-    # Получаем статус лог-файла
-    local log_status
-    log_status=$(get_jail_log_status "$jail")
+    # Получаем путь к логу из уже полученного статуса (без повторного вызова fail2ban-client)
+    local logpath=$(echo "$status" | grep "File list:" | sed 's/.*File list:[[:space:]]*//' | head -1)
+    local log_status=$(get_jail_log_status "$logpath")
     
     echo -e "${indent}${status_color}${status_icon} ${BOLD}$jail${NC} ${GRAY}│${NC} Попытки: ${YELLOW}${currently_failed:-0}${NC}/${DIM}${total_failed:-0}${NC} ${GRAY}│${NC} Блоки: ${RED}${currently_banned:-0}${NC}/${DIM}${total_banned:-0}${NC}"
     echo -e "${indent}   ${log_status}"
   fi
 }
 
-# Проверка статуса лог-файла для jail'а
+# Проверка статуса лог-файла для jail'а (принимает путь к логу)
 function get_jail_log_status() {
-  local jail="$1"
-  local logpath=""
-  
-  # Получаем logpath из статуса fail2ban-client (быстрый способ)
-  # Формат: "   File list:	/var/log/auth.log"
-  logpath=$(fail2ban-client status "$jail" 2>/dev/null | grep "File list:" | sed 's/.*File list:[[:space:]]*//' | head -1)
-  
-  # Если не нашли в статусе, ищем в конфигах
-  if [ -z "$logpath" ]; then
-    if [ -f "$JAIL_LOCAL" ]; then
-      logpath=$(awk "/^\[$jail\]/,/^\[/{if(/^logpath/){gsub(/.*=/,\"\"); gsub(/^[[:space:]]+|[[:space:]]+$/,\"\"); print; exit}}" "$JAIL_LOCAL" 2>/dev/null)
-    fi
-  fi
+  local logpath="$1"
   
   if [ -z "$logpath" ]; then
     echo -e "${GRAY}└─ ${DIM}Лог: путь не определён${NC}"
     return
   fi
   
-  # Проверяем существование файла (быстро)
+  # Проверяем существование файла
   if [ ! -e "$logpath" ]; then
     echo -e "${RED}└─ ${ICON_CROSS} Лог не найден:${NC} ${DIM}$logpath${NC}"
     return
