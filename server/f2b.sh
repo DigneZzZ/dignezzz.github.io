@@ -1,13 +1,16 @@
 #!/bin/bash
 
 # Версия скрипта
-SCRIPT_VERSION="3.4.7"
+SCRIPT_VERSION="3.5.0"
 VERSION_CHECK_URL="https://raw.githubusercontent.com/DigneZzZ/dignezzz.github.io/main/server/f2b.sh"
 
 # Константы путей конфигурации
 readonly JAIL_LOCAL="/etc/fail2ban/jail.local"
 readonly F2B_LOG="/var/log/fail2ban.log"
 readonly F2B_FILTER_DIR="/etc/fail2ban/filter.d"
+
+# Таймаут для fail2ban-client команд (секунды)
+readonly F2B_TIMEOUT=3
 
 # Современная цветовая палитра
 GREEN='\033[38;5;46m'      # Яркий зелёный
@@ -436,8 +439,8 @@ function show_statistics() {
 function show_jail_stats() {
   local jail="$1"
   local indent="$2"
-  local status=$(fail2ban-client status "$jail" 2>/dev/null)
-  if [ $? -eq 0 ]; then
+  local status=$(timeout $F2B_TIMEOUT fail2ban-client status "$jail" 2>/dev/null)
+  if [ $? -eq 0 ] && [ -n "$status" ]; then
     local currently_failed=$(echo "$status" | grep "Currently failed:" | awk -F: '{print $2}' | tr -d ' \t')
     local total_failed=$(echo "$status" | grep "Total failed:" | awk -F: '{print $2}' | tr -d ' \t')
     local currently_banned=$(echo "$status" | grep "Currently banned:" | awk -F: '{print $2}' | tr -d ' \t')
@@ -453,22 +456,12 @@ function show_jail_stats() {
       status_color="${YELLOW}"
     fi
     
-    # Получаем путь к логу: сначала из статуса (File list:), если нет - из конфигурации jail
+    # Получаем путь к логу: из статуса или из jail.local
     local logpath=""
-    
-    # Способ 1: Из статуса (для file-based jails)
     if echo "$status" | grep -q "File list:"; then
       logpath=$(echo "$status" | grep "File list:" | awk -F'File list:' '{print $2}' | tr -d ' \t')
     fi
-    
-    # Способ 2: Из конфигурации jail через fail2ban-client get
-    if [ -z "$logpath" ]; then
-      logpath=$(fail2ban-client get "$jail" logpath 2>/dev/null | head -1)
-    fi
-    
-    # Способ 3: Из jail.local напрямую
     if [ -z "$logpath" ] && [ -f "$JAIL_LOCAL" ]; then
-      # Ищем секцию [$jail] и извлекаем logpath
       logpath=$(awk -v jail="$jail" '
         BEGIN { in_section=0 }
         /^\[/ { in_section=0 }
@@ -588,10 +581,10 @@ function unban_all() {
   fi
 }
 
-# Helper function: Get list of active jails
+# Helper function: Get list of active jails (с таймаутом)
 function get_active_jails() {
   if command -v fail2ban-client &>/dev/null && systemctl is-active --quiet fail2ban; then
-    fail2ban-client status 2>/dev/null | grep "Jail list:" | cut -d: -f2 | tr -d ' 	'
+    timeout $F2B_TIMEOUT fail2ban-client status 2>/dev/null | grep "Jail list:" | cut -d: -f2 | tr -d ' 	'
   fi
 }
 
