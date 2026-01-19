@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Версия скрипта
-SCRIPT_VERSION="3.4.0"
+SCRIPT_VERSION="3.4.5"
 VERSION_CHECK_URL="https://raw.githubusercontent.com/DigneZzZ/dignezzz.github.io/main/server/f2b.sh"
 
 # Константы путей конфигурации
@@ -419,10 +419,10 @@ function show_jail_stats() {
   local indent="$2"
   local status=$(fail2ban-client status "$jail" 2>/dev/null)
   if [ $? -eq 0 ]; then
-    local currently_failed=$(echo "$status" | grep "Currently failed:" | cut -d: -f2 | tr -d ' ')
-    local total_failed=$(echo "$status" | grep "Total failed:" | cut -d: -f2 | tr -d ' ')
-    local currently_banned=$(echo "$status" | grep "Currently banned:" | cut -d: -f2 | tr -d ' ')
-    local total_banned=$(echo "$status" | grep "Total banned:" | cut -d: -f2 | tr -d ' ')
+    local currently_failed=$(echo "$status" | grep "Currently failed:" | awk -F: '{print $2}' | tr -d ' \t')
+    local total_failed=$(echo "$status" | grep "Total failed:" | awk -F: '{print $2}' | tr -d ' \t')
+    local currently_banned=$(echo "$status" | grep "Currently banned:" | awk -F: '{print $2}' | tr -d ' \t')
+    local total_banned=$(echo "$status" | grep "Total banned:" | awk -F: '{print $2}' | tr -d ' \t')
     
     local status_icon="${ICON_CHECK}"
     local status_color="${GREEN}"
@@ -434,8 +434,9 @@ function show_jail_stats() {
       status_color="${YELLOW}"
     fi
     
-    # Получаем путь к логу из уже полученного статуса (без повторного вызова fail2ban-client)
-    local logpath=$(echo "$status" | grep "File list:" | sed 's/.*File list:[[:space:]]*//' | head -1)
+    # Получаем путь к логу из уже полученного статуса
+    # Формат: "`- File list:	/var/log/auth.log" (с табуляцией)
+    local logpath=$(echo "$status" | grep "File list:" | awk -F'File list:' '{print $2}' | tr -d ' \t')
     local log_status=$(get_jail_log_status "$logpath")
     
     echo -e "${indent}${status_color}${status_icon} ${BOLD}$jail${NC} ${GRAY}│${NC} Попытки: ${YELLOW}${currently_failed:-0}${NC}/${DIM}${total_failed:-0}${NC} ${GRAY}│${NC} Блоки: ${RED}${currently_banned:-0}${NC}/${DIM}${total_banned:-0}${NC}"
