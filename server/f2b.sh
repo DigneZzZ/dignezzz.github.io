@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Версия скрипта
-SCRIPT_VERSION="3.5.2"
+SCRIPT_VERSION="3.5.3"
 VERSION_CHECK_URL="https://raw.githubusercontent.com/DigneZzZ/dignezzz.github.io/main/server/f2b.sh"
 
 # Константы путей конфигурации
@@ -472,7 +472,7 @@ function get_jail_logpath() {
   local logpath=""
   local backend=""
   
-  # Сначала проверяем backend в jail.local
+  # Проверяем backend и logpath в jail.local
   if [ -f "$JAIL_LOCAL" ]; then
     backend=$(awk -v jail="$jail" '
       BEGIN { in_section=0 }
@@ -481,13 +481,26 @@ function get_jail_logpath() {
       in_section && /^backend/ { gsub(/^backend[[:space:]]*=[[:space:]]*/, ""); print; exit }
     ' "$JAIL_LOCAL")
     
-    # Читаем logpath из jail.local
     logpath=$(awk -v jail="$jail" '
       BEGIN { in_section=0 }
       /^\[/ { in_section=0 }
       $0 ~ "^\\[" jail "\\]" { in_section=1; next }
       in_section && /^logpath/ { gsub(/^logpath[[:space:]]*=[[:space:]]*/, ""); print; exit }
     ' "$JAIL_LOCAL")
+  fi
+  
+  # Проверяем дефолтный backend в [DEFAULT] секции jail.local или jail.conf
+  if [ -z "$backend" ]; then
+    for cfg in "$JAIL_LOCAL" /etc/fail2ban/jail.conf; do
+      [ -f "$cfg" ] || continue
+      backend=$(awk '
+        BEGIN { in_default=0 }
+        /^\[DEFAULT\]/ { in_default=1; next }
+        /^\[/ { in_default=0 }
+        in_default && /^backend/ { gsub(/^backend[[:space:]]*=[[:space:]]*/, ""); print; exit }
+      ' "$cfg")
+      [ -n "$backend" ] && break
+    done
   fi
   
   # Если backend=systemd, возвращаем специальный маркер
