@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Версия скрипта
-SCRIPT_VERSION="3.4.5"
+SCRIPT_VERSION="3.4.7"
 VERSION_CHECK_URL="https://raw.githubusercontent.com/DigneZzZ/dignezzz.github.io/main/server/f2b.sh"
 
 # Константы путей конфигурации
@@ -263,46 +263,65 @@ function check_version() {
 }
 
 function update_script() {
-  echo -e "${YELLOW}Updating script...${NC}"
+  echo -e "${YELLOW}Обновление скрипта...${NC}"
   
   if [ "$EUID" -ne 0 ]; then
-    echo -e "${RED}Root privileges required for update${NC}"
+    echo -e "${RED}Требуются права root для обновления${NC}"
     return 1
   fi
   
-  # Создаем резервную копию
+  # Создаем резервную копию если файл существует
   if [ -f "$INSTALL_PATH" ]; then
     cp "$INSTALL_PATH" "${INSTALL_PATH}.bak_$(date +%Y%m%d_%H%M%S)"
-    echo -e "${CYAN}Backup created: ${INSTALL_PATH}.bak_$(date +%Y%m%d_%H%M%S)${NC}"
+    echo -e "${CYAN}Резервная копия создана${NC}"
   fi
   
-  # Скачиваем новую версию
+  # Скачиваем новую версию во временный файл
+  local tmp_file="/tmp/f2b_update_$$"
+  
   if command -v curl &>/dev/null; then
-    if curl -s "$VERSION_CHECK_URL" > "$INSTALL_PATH"; then
-      chmod +x "$INSTALL_PATH"
-      echo -e "${GREEN}✓ Script updated successfully!${NC}"
-      echo -e "${CYAN}New version installed to $INSTALL_PATH${NC}"
-      echo ""
-      echo -e "${YELLOW}Restart the script to use the new version${NC}"
-      return 0
+    if curl -sL --connect-timeout 10 --max-time 30 "$VERSION_CHECK_URL" -o "$tmp_file" && [ -s "$tmp_file" ]; then
+      # Проверяем что скачался валидный скрипт
+      if head -1 "$tmp_file" | grep -q "^#!/bin/bash"; then
+        mv "$tmp_file" "$INSTALL_PATH"
+        chmod +x "$INSTALL_PATH"
+        echo -e "${GREEN}✓ Скрипт успешно обновлён!${NC}"
+        echo -e "${CYAN}Новая версия установлена в $INSTALL_PATH${NC}"
+        echo ""
+        echo -e "${YELLOW}Перезапустите скрипт для использования новой версии${NC}"
+        return 0
+      else
+        rm -f "$tmp_file"
+        echo -e "${RED}✗ Скачанный файл не является валидным скриптом${NC}"
+        return 1
+      fi
     else
-      echo -e "${RED}✗ Failed to download update${NC}"
+      rm -f "$tmp_file" 2>/dev/null
+      echo -e "${RED}✗ Ошибка загрузки${NC}"
       return 1
     fi
   elif command -v wget &>/dev/null; then
-    if wget -q -O "$INSTALL_PATH" "$VERSION_CHECK_URL"; then
-      chmod +x "$INSTALL_PATH"
-      echo -e "${GREEN}✓ Script updated successfully!${NC}"
-      echo -e "${CYAN}New version installed to $INSTALL_PATH${NC}"
-      echo ""
-      echo -e "${YELLOW}Restart the script to use the new version${NC}"
-      return 0
+    if wget -q --timeout=30 -O "$tmp_file" "$VERSION_CHECK_URL" && [ -s "$tmp_file" ]; then
+      if head -1 "$tmp_file" | grep -q "^#!/bin/bash"; then
+        mv "$tmp_file" "$INSTALL_PATH"
+        chmod +x "$INSTALL_PATH"
+        echo -e "${GREEN}✓ Скрипт успешно обновлён!${NC}"
+        echo -e "${CYAN}Новая версия установлена в $INSTALL_PATH${NC}"
+        echo ""
+        echo -e "${YELLOW}Перезапустите скрипт для использования новой версии${NC}"
+        return 0
+      else
+        rm -f "$tmp_file"
+        echo -e "${RED}✗ Скачанный файл не является валидным скриптом${NC}"
+        return 1
+      fi
     else
-      echo -e "${RED}✗ Failed to download update${NC}"
+      rm -f "$tmp_file" 2>/dev/null
+      echo -e "${RED}✗ Ошибка загрузки${NC}"
       return 1
     fi
   else
-    echo -e "${RED}Neither curl nor wget available for download${NC}"
+    echo -e "${RED}Ни curl, ни wget не доступны для загрузки${NC}"
     return 1
   fi
 }
@@ -434,9 +453,30 @@ function show_jail_stats() {
       status_color="${YELLOW}"
     fi
     
-    # Получаем путь к логу из уже полученного статуса
-    # Формат: "`- File list:	/var/log/auth.log" (с табуляцией)
-    local logpath=$(echo "$status" | grep "File list:" | awk -F'File list:' '{print $2}' | tr -d ' \t')
+    # Получаем путь к логу: сначала из статуса (File list:), если нет - из конфигурации jail
+    local logpath=""
+    
+    # Способ 1: Из статуса (для file-based jails)
+    if echo "$status" | grep -q "File list:"; then
+      logpath=$(echo "$status" | grep "File list:" | awk -F'File list:' '{print $2}' | tr -d ' \t')
+    fi
+    
+    # Способ 2: Из конфигурации jail через fail2ban-client get
+    if [ -z "$logpath" ]; then
+      logpath=$(fail2ban-client get "$jail" logpath 2>/dev/null | head -1)
+    fi
+    
+    # Способ 3: Из jail.local напрямую
+    if [ -z "$logpath" ] && [ -f "$JAIL_LOCAL" ]; then
+      # Ищем секцию [$jail] и извлекаем logpath
+      logpath=$(awk -v jail="$jail" '
+        BEGIN { in_section=0 }
+        /^\[/ { in_section=0 }
+        $0 ~ "^\\[" jail "\\]" { in_section=1; next }
+        in_section && /^logpath/ { gsub(/^logpath[[:space:]]*=[[:space:]]*/, ""); print; exit }
+      ' "$JAIL_LOCAL")
+    fi
+    
     local log_status=$(get_jail_log_status "$logpath")
     
     echo -e "${indent}${status_color}${status_icon} ${BOLD}$jail${NC} ${GRAY}│${NC} Попытки: ${YELLOW}${currently_failed:-0}${NC}/${DIM}${total_failed:-0}${NC} ${GRAY}│${NC} Блоки: ${RED}${currently_banned:-0}${NC}/${DIM}${total_banned:-0}${NC}"
