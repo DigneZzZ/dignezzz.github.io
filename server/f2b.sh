@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Версия скрипта
-SCRIPT_VERSION="3.5.4"
+SCRIPT_VERSION="3.5.7"
 VERSION_CHECK_URL="https://raw.githubusercontent.com/DigneZzZ/dignezzz.github.io/main/server/f2b.sh"
 
 # Константы путей конфигурации
@@ -472,36 +472,68 @@ function get_jail_logpath() {
   local logpath=""
   local backend=""
   
-  # Читаем backend и logpath из jail.local для конкретного jail
-  if [ -f "$JAIL_LOCAL" ]; then
-    backend=$(awk -v jail="$jail" '
-      BEGIN { in_section=0 }
-      /^\[/ { in_section=0 }
-      $0 ~ "^\\[" jail "\\]" { in_section=1; next }
-      in_section && /^backend/ { gsub(/^backend[[:space:]]*=[[:space:]]*/, ""); print; exit }
-    ' "$JAIL_LOCAL")
+  # Читаем backend и logpath из jail.local, потом из jail.conf
+  for cfg in "$JAIL_LOCAL" /etc/fail2ban/jail.conf; do
+    [ -f "$cfg" ] || continue
     
-    logpath=$(awk -v jail="$jail" '
-      BEGIN { in_section=0 }
-      /^\[/ { in_section=0 }
-      $0 ~ "^\\[" jail "\\]" { in_section=1; next }
-      in_section && /^logpath/ { gsub(/^logpath[[:space:]]*=[[:space:]]*/, ""); print; exit }
-    ' "$JAIL_LOCAL")
+    # Ищем backend в секции jail
+    if [ -z "$backend" ]; then
+      backend=$(awk -v jail="$jail" '
+        BEGIN { in_section=0 }
+        /^\[/ { in_section=0 }
+        $0 ~ "^\\[" jail "\\]" { in_section=1; next }
+        in_section && /^backend/ { gsub(/^backend[[:space:]]*=[[:space:]]*/, ""); print; exit }
+      ' "$cfg")
+    fi
+    
+    # Ищем logpath в секции jail
+    if [ -z "$logpath" ]; then
+      logpath=$(awk -v jail="$jail" '
+        BEGIN { in_section=0 }
+        /^\[/ { in_section=0 }
+        $0 ~ "^\\[" jail "\\]" { in_section=1; next }
+        in_section && /^logpath/ { gsub(/^logpath[[:space:]]*=[[:space:]]*/, ""); print; exit }
+      ' "$cfg")
+    fi
+  done
+  
+  # Проверяем дефолтный backend в [DEFAULT]
+  if [ -z "$backend" ]; then
+    for cfg in "$JAIL_LOCAL" /etc/fail2ban/jail.conf; do
+      [ -f "$cfg" ] || continue
+      backend=$(awk '
+        BEGIN { in_default=0 }
+        /^\[DEFAULT\]/ { in_default=1; next }
+        /^\[/ { in_default=0 }
+        in_default && /^backend/ { gsub(/^backend[[:space:]]*=[[:space:]]*/, ""); print; exit }
+      ' "$cfg")
+      [ -n "$backend" ] && break
+    done
   fi
   
-  # Если у jail'а есть свой logpath — это файл, не systemd
-  if [ -n "$logpath" ]; then
-    echo "$logpath"
-    return
-  fi
-  
-  # Если у jail'а явно указан backend=systemd
+  # Если backend=systemd
   if [ "$backend" = "systemd" ]; then
     echo "systemd"
     return
   fi
   
-  # Стандартные пути для известных jail'ов
+  # Если logpath найден — проверяем существует ли файл
+  if [ -n "$logpath" ]; then
+    if [ -f "$logpath" ]; then
+      echo "$logpath"
+      return
+    fi
+    # Файл не существует — для sshd это означает systemd
+    if [[ "$jail" =~ ^(sshd|ssh)$ ]]; then
+      echo "systemd"
+      return
+    fi
+    # Для других jail'ов возвращаем путь (покажет ошибку "не найден")
+    echo "$logpath"
+    return
+  fi
+  
+  # Стандартные пути для известных jail'ов (последний фоллбэк)
   case "$jail" in
     sshd|ssh)
       # SSH обычно использует systemd на современных системах
@@ -1545,8 +1577,22 @@ function detect_os() {
 
 function get_ssh_log_path() {
   # Определяем путь к SSH логам в зависимости от ОС
+  # На системах с systemd используем journald (backend=systemd в jail.conf)
   detect_os
   
+  # Сначала проверяем существование файлов
+  if [ -f "/var/log/auth.log" ]; then
+    echo "/var/log/auth.log"
+    return
+  fi
+  
+  if [ -f "/var/log/secure" ]; then
+    echo "/var/log/secure"
+    return
+  fi
+  
+  # Файлы не найдены — значит используется systemd journal
+  # Возвращаем placeholder, реальный backend = systemd в [DEFAULT]
   case "$OS_ID" in
     ubuntu|debian)
       echo "/var/log/auth.log"
@@ -1554,23 +1600,8 @@ function get_ssh_log_path() {
     almalinux|rocky|rhel|centos|fedora)
       echo "/var/log/secure"
       ;;
-    opensuse*|sles)
-      echo "/var/log/messages"
-      ;;
-    arch)
-      echo "/var/log/auth.log"
-      ;;
     *)
-      # Пробуем найти существующий лог файл
-      if [ -f "/var/log/auth.log" ]; then
-        echo "/var/log/auth.log"
-      elif [ -f "/var/log/secure" ]; then
-        echo "/var/log/secure"
-      elif [ -f "/var/log/messages" ]; then
-        echo "/var/log/messages"
-      else
-        echo "/var/log/auth.log"  # По умолчанию
-      fi
+      echo "/var/log/auth.log"
       ;;
   esac
 }
@@ -2021,9 +2052,15 @@ function backup_and_configure_fail2ban() {
     cp -f "$JAIL_LOCAL" "${JAIL_LOCAL}.bak_$(date +%Y%m%d_%H%M%S)" 2>/dev/null
   fi
 
-  # Получаем правильный путь к SSH логам
-  local ssh_log_path=$(get_ssh_log_path)
+  # Проверяем есть ли файловые логи SSH
+  local ssh_log_path=""
+  if [ -f "/var/log/auth.log" ]; then
+    ssh_log_path="/var/log/auth.log"
+  elif [ -f "/var/log/secure" ]; then
+    ssh_log_path="/var/log/secure"
+  fi
 
+  # Формируем конфигурацию
   cat > "$JAIL_LOCAL" <<EOF
 [DEFAULT]
 ignoreip = 127.0.0.1/8
@@ -2039,8 +2076,13 @@ backend = systemd
 enabled = true
 port = $SSH_PORT
 filter = sshd
-logpath = $ssh_log_path
 EOF
+
+  # Добавляем logpath только если есть файловые логи
+  if [ -n "$ssh_log_path" ]; then
+    echo "logpath = $ssh_log_path" >> "$JAIL_LOCAL"
+    echo "backend = auto" >> "$JAIL_LOCAL"
+  fi
 
   echo -e "${GREEN}Fail2ban configured with dynamic SSH blocking.${NC}"
 }
