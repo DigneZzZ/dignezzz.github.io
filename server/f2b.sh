@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Версия скрипта
-SCRIPT_VERSION="3.2.0"
+SCRIPT_VERSION="3.3.0"
 VERSION_CHECK_URL="https://raw.githubusercontent.com/DigneZzZ/dignezzz.github.io/main/server/f2b.sh"
 
 # Константы путей конфигурации
@@ -448,14 +448,14 @@ function get_jail_log_status() {
   local jail="$1"
   local logpath=""
   
-  # Получаем logpath из конфига jail
-  local jail_status=$(fail2ban-client status "$jail" 2>/dev/null)
-  logpath=$(echo "$jail_status" | grep -oP 'File list:\s*\K.*' | tr -d '\t ')
+  # Получаем logpath из статуса fail2ban-client (быстрый способ)
+  # Формат: "   File list:	/var/log/auth.log"
+  logpath=$(fail2ban-client status "$jail" 2>/dev/null | grep "File list:" | sed 's/.*File list:[[:space:]]*//' | head -1)
   
   # Если не нашли в статусе, ищем в конфигах
   if [ -z "$logpath" ]; then
     if [ -f "$JAIL_LOCAL" ]; then
-      logpath=$(grep -A 15 "^\[$jail\]" "$JAIL_LOCAL" 2>/dev/null | grep "^logpath" | head -1 | cut -d'=' -f2 | tr -d ' ')
+      logpath=$(awk "/^\[$jail\]/,/^\[/{if(/^logpath/){gsub(/.*=/,\"\"); gsub(/^[[:space:]]+|[[:space:]]+$/,\"\"); print; exit}}" "$JAIL_LOCAL" 2>/dev/null)
     fi
   fi
   
@@ -464,7 +464,7 @@ function get_jail_log_status() {
     return
   fi
   
-  # Проверяем существование и читаемость файла
+  # Проверяем существование файла (быстро)
   if [ ! -e "$logpath" ]; then
     echo -e "${RED}└─ ${ICON_CROSS} Лог не найден:${NC} ${DIM}$logpath${NC}"
     return
@@ -475,13 +475,26 @@ function get_jail_log_status() {
     return
   fi
   
-  # Получаем информацию о файле
-  local file_size=$(stat -c%s "$logpath" 2>/dev/null || stat -f%z "$logpath" 2>/dev/null)
-  local file_size_hr=$(numfmt --to=iec-i --suffix=B "$file_size" 2>/dev/null || echo "${file_size}B")
-  local line_count=$(wc -l < "$logpath" 2>/dev/null | tr -d ' ')
-  local last_modified=$(stat -c%Y "$logpath" 2>/dev/null || stat -f%m "$logpath" 2>/dev/null)
-  local now=$(date +%s)
-  local age=$((now - last_modified))
+  # Получаем информацию о файле (только stat, без wc -l для скорости)
+  local file_size last_modified
+  file_size=$(stat -c%s "$logpath" 2>/dev/null || stat -f%z "$logpath" 2>/dev/null)
+  last_modified=$(stat -c%Y "$logpath" 2>/dev/null || stat -f%m "$logpath" 2>/dev/null)
+  
+  # Форматируем размер
+  local file_size_hr
+  if [ "$file_size" -gt 1073741824 ]; then
+    file_size_hr="$(( file_size / 1073741824 ))GiB"
+  elif [ "$file_size" -gt 1048576 ]; then
+    file_size_hr="$(( file_size / 1048576 ))MiB"
+  elif [ "$file_size" -gt 1024 ]; then
+    file_size_hr="$(( file_size / 1024 ))KiB"
+  else
+    file_size_hr="${file_size}B"
+  fi
+  
+  local now age
+  now=$(date +%s)
+  age=$((now - last_modified))
   
   # Определяем "свежесть" лога
   local freshness_icon freshness_text
@@ -490,26 +503,27 @@ function get_jail_log_status() {
     freshness_text="активен"
   elif [ "$age" -lt 3600 ]; then
     freshness_icon="${YELLOW}●${NC}"
-    freshness_text="обновлён $(( age / 60 ))м назад"
+    freshness_text="$(( age / 60 ))м назад"
   elif [ "$age" -lt 86400 ]; then
     freshness_icon="${ORANGE}●${NC}"
-    freshness_text="обновлён $(( age / 3600 ))ч назад"
+    freshness_text="$(( age / 3600 ))ч назад"
   else
     freshness_icon="${RED}●${NC}"
-    freshness_text="неактивен $(( age / 86400 ))д"
+    freshness_text="$(( age / 86400 ))д назад"
   fi
   
-  echo -e "${GRAY}└─${NC} ${freshness_icon} ${DIM}$logpath${NC} ${GRAY}(${line_count} строк, ${file_size_hr}, ${freshness_text})${NC}"
+  echo -e "${GRAY}└─${NC} ${freshness_icon} ${DIM}$logpath${NC} ${GRAY}(${file_size_hr}, ${freshness_text})${NC}"
 }
 
 function check_ssh_port_consistency_quiet() {
   # Тихая проверка портов SSH для статистики
-  local current_ssh_port=$(grep -Po '(?<=^Port )\d+' /etc/ssh/sshd_config | head -n1)
+  local current_ssh_port=$(grep -Po '(?<=^Port )\d+' /etc/ssh/sshd_config 2>/dev/null | head -n1)
   current_ssh_port=${current_ssh_port:-22}
   
   local f2b_ssh_port=""
   if [ -f "$JAIL_LOCAL" ]; then
-    f2b_ssh_port=$(grep -A 10 "\[sshd\]" "$JAIL_LOCAL" | grep "^port" | cut -d'=' -f2 | tr -d ' ')
+    # Используем awk для извлечения порта только из секции [sshd], останавливаемся на следующей секции
+    f2b_ssh_port=$(awk '/^\[sshd\]/,/^\[/{if(/^port[[:space:]]*=/){gsub(/.*=[[:space:]]*/,""); gsub(/[[:space:]]*$/,""); print; exit}}' "$JAIL_LOCAL" 2>/dev/null)
   fi
   
   if [ -n "$f2b_ssh_port" ] && [ "$current_ssh_port" != "$f2b_ssh_port" ]; then
