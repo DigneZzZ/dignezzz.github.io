@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Версия скрипта
-SCRIPT_VERSION="3.5.0"
+SCRIPT_VERSION="3.5.2"
 VERSION_CHECK_URL="https://raw.githubusercontent.com/DigneZzZ/dignezzz.github.io/main/server/f2b.sh"
 
 # Константы путей конфигурации
@@ -456,25 +456,90 @@ function show_jail_stats() {
       status_color="${YELLOW}"
     fi
     
-    # Получаем путь к логу: из статуса или из jail.local
-    local logpath=""
-    if echo "$status" | grep -q "File list:"; then
-      logpath=$(echo "$status" | grep "File list:" | awk -F'File list:' '{print $2}' | tr -d ' \t')
-    fi
-    if [ -z "$logpath" ] && [ -f "$JAIL_LOCAL" ]; then
-      logpath=$(awk -v jail="$jail" '
-        BEGIN { in_section=0 }
-        /^\[/ { in_section=0 }
-        $0 ~ "^\\[" jail "\\]" { in_section=1; next }
-        in_section && /^logpath/ { gsub(/^logpath[[:space:]]*=[[:space:]]*/, ""); print; exit }
-      ' "$JAIL_LOCAL")
-    fi
-    
+    # Получаем путь к логу
+    local logpath=$(get_jail_logpath "$jail")
     local log_status=$(get_jail_log_status "$logpath")
     
     echo -e "${indent}${status_color}${status_icon} ${BOLD}$jail${NC} ${GRAY}│${NC} Попытки: ${YELLOW}${currently_failed:-0}${NC}/${DIM}${total_failed:-0}${NC} ${GRAY}│${NC} Блоки: ${RED}${currently_banned:-0}${NC}/${DIM}${total_banned:-0}${NC}"
     echo -e "${indent}   ${log_status}"
   fi
+}
+
+# Получить путь к логу для jail'а (стандартные пути + фоллбэк на jail.local)
+# Возвращает: путь к файлу ИЛИ "systemd" если используется journald
+function get_jail_logpath() {
+  local jail="$1"
+  local logpath=""
+  local backend=""
+  
+  # Сначала проверяем backend в jail.local
+  if [ -f "$JAIL_LOCAL" ]; then
+    backend=$(awk -v jail="$jail" '
+      BEGIN { in_section=0 }
+      /^\[/ { in_section=0 }
+      $0 ~ "^\\[" jail "\\]" { in_section=1; next }
+      in_section && /^backend/ { gsub(/^backend[[:space:]]*=[[:space:]]*/, ""); print; exit }
+    ' "$JAIL_LOCAL")
+    
+    # Читаем logpath из jail.local
+    logpath=$(awk -v jail="$jail" '
+      BEGIN { in_section=0 }
+      /^\[/ { in_section=0 }
+      $0 ~ "^\\[" jail "\\]" { in_section=1; next }
+      in_section && /^logpath/ { gsub(/^logpath[[:space:]]*=[[:space:]]*/, ""); print; exit }
+    ' "$JAIL_LOCAL")
+  fi
+  
+  # Если backend=systemd, возвращаем специальный маркер
+  if [ "$backend" = "systemd" ]; then
+    echo "systemd"
+    return
+  fi
+  
+  # Если logpath найден в jail.local - используем его
+  if [ -n "$logpath" ]; then
+    echo "$logpath"
+    return
+  fi
+  
+  # Стандартные пути для известных jail'ов (фоллбэк)
+  case "$jail" in
+    sshd|ssh)
+      for p in /var/log/auth.log /var/log/secure; do
+        [ -f "$p" ] && { logpath="$p"; break; }
+      done
+      # Если файлы не найдены, возможно systemd
+      [ -z "$logpath" ] && logpath="systemd"
+      ;;
+    caddy)
+      for p in /var/log/caddy/access.log /var/log/caddy/caddy.log; do
+        [ -f "$p" ] && { logpath="$p"; break; }
+      done
+      ;;
+    nginx|nginx-*)
+      for p in /var/log/nginx/access.log /var/log/nginx/error.log; do
+        [ -f "$p" ] && { logpath="$p"; break; }
+      done
+      ;;
+    apache|apache-*)
+      for p in /var/log/apache2/access.log /var/log/apache2/error.log /var/log/httpd/access_log; do
+        [ -f "$p" ] && { logpath="$p"; break; }
+      done
+      ;;
+    mysql|mariadb)
+      for p in /var/log/mysql/error.log /var/log/mariadb/mariadb.log; do
+        [ -f "$p" ] && { logpath="$p"; break; }
+      done
+      ;;
+    postfix|postfix-*)
+      [ -f /var/log/mail.log ] && logpath="/var/log/mail.log"
+      ;;
+    dovecot)
+      [ -f /var/log/mail.log ] && logpath="/var/log/mail.log"
+      ;;
+  esac
+  
+  echo "$logpath"
 }
 
 # Проверка статуса лог-файла для jail'а (принимает путь к логу)
@@ -483,6 +548,12 @@ function get_jail_log_status() {
   
   if [ -z "$logpath" ]; then
     echo -e "${GRAY}└─ ${DIM}Лог: путь не определён${NC}"
+    return
+  fi
+  
+  # Если используется systemd journal
+  if [ "$logpath" = "systemd" ]; then
+    echo -e "${CYAN}└─ ${ICON_INFO} Лог: systemd journal${NC}"
     return
   fi
   
