@@ -238,9 +238,9 @@ function check_version() {
       
       # Предлагаем автоматическое обновление если скрипт установлен в системе
       if [ -f "$INSTALL_PATH" ] && [ "$EUID" -eq 0 ]; then
-        echo -e "${CYAN}Do you want to update automatically? (y/N):${NC}"
+        echo -e "${CYAN}Обновить автоматически? (Y/n):${NC}"
         read -r response
-        if [[ "$response" =~ ^[Yy]$ ]]; then
+        if [[ -z "$response" || "$response" =~ ^[Yy]$ ]]; then
           update_script
           return $?
         fi
