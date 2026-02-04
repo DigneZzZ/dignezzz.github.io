@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Версия скрипта
-SCRIPT_VERSION="3.5.9"
+SCRIPT_VERSION="3.6.0"
 VERSION_CHECK_URL="https://raw.githubusercontent.com/DigneZzZ/dignezzz.github.io/main/server/f2b.sh"
 
 # Константы путей конфигурации
@@ -551,6 +551,15 @@ function get_jail_logpath() {
       echo "systemd"
       ;;
     caddy)
+      # Проверяем наличие нескольких *access.log файлов
+      if [ -d "/var/log/caddy" ]; then
+        local access_logs
+        access_logs=$(find /var/log/caddy -maxdepth 1 -name "*access.log" -type f 2>/dev/null | head -1)
+        if [ -n "$access_logs" ]; then
+          echo "/var/log/caddy/*access.log"
+          return
+        fi
+      fi
       for p in /var/log/caddy/access.log /var/log/caddy/caddy.log; do
         [ -f "$p" ] && { echo "$p"; return; }
       done
@@ -1202,28 +1211,53 @@ EOF
       if [ "$caddy_log" = "systemd-journal" ]; then
         echo -e "${CYAN}${ICON_INFO} Caddy использует systemd journal для логирования${NC}"
         echo -e "${YELLOW}${ICON_WARNING} Для работы Fail2ban настройте логирование Caddy в файл${NC}"
-        echo -e "${GRAY}   В Caddyfile добавьте:${NC}"
+        echo -e "${GRAY}   В Caddyfile добавьте для каждого сайта:${NC}"
         echo -e "${GRAY}   log {${NC}"
-        echo -e "${GRAY}     output file /var/log/caddy/access.log${NC}"
+        echo -e "${GRAY}     output file /var/log/caddy/site.domain.access.log${NC}"
         echo -e "${GRAY}     format json${NC}"
         echo -e "${GRAY}   }${NC}"
         return 1
       fi
       
-      if [ ! -f "$caddy_log" ]; then
+      # Проверяем, является ли путь паттерном с wildcard
+      local is_pattern=false
+      if [[ "$caddy_log" == *"*"* ]]; then
+        is_pattern=true
+        # Проверяем, есть ли файлы по паттерну
+        local pattern_files
+        pattern_files=$(compgen -G "$caddy_log" 2>/dev/null)
+        if [ -z "$pattern_files" ]; then
+          echo -e "${YELLOW}${ICON_WARNING} Логи Caddy не найдены по паттерну: ${caddy_log}${NC}"
+          is_pattern=false
+        else
+          local files_count
+          files_count=$(echo "$pattern_files" | wc -l)
+          echo -e "${CYAN}${ICON_INFO} Найдено ${files_count} лог-файлов Caddy:${NC}"
+          echo "$pattern_files" | while read -r f; do
+            echo -e "${GRAY}   - $(basename "$f")${NC}"
+          done
+        fi
+      fi
+      
+      if [ "$is_pattern" = false ] && [ ! -f "$caddy_log" ]; then
         echo -e "${YELLOW}${ICON_WARNING} Лог Caddy не найден: ${caddy_log}${NC}"
         if is_service_in_docker "caddy"; then
           echo -e "${CYAN}${ICON_INFO} Caddy работает в Docker. Убедитесь, что логи примонтированы.${NC}"
           echo -e "${GRAY}   Пример: -v /var/log/caddy:/var/log/caddy${NC}"
         fi
-        echo -ne "${CYAN}Введите путь к логу вручную (или Enter для пропуска):${NC} "
+        echo -ne "${CYAN}Введите путь к логу вручную (или Enter для /var/log/caddy/*access.log):${NC} "
         read -r manual_path
         if [ -n "$manual_path" ]; then
           caddy_log="$manual_path"
+        else
+          caddy_log="/var/log/caddy/*access.log"
         fi
       fi
       
       echo -e "${GREEN}${ICON_CHECK} Используем лог: ${caddy_log}${NC}"
+      if [[ "$caddy_log" == *"*"* ]]; then
+        echo -e "${CYAN}${ICON_INFO} Паттерн позволяет мониторить все *access.log файлы${NC}"
+      fi
       add_jail_config "$service" "enabled = true" "port = http,https" "filter = caddy-auth" "logpath = $caddy_log" "maxretry = 3" "bantime = 600"
       ;;
     "mysql")
@@ -1739,7 +1773,26 @@ function get_nginx_log_path() {
 }
 
 # Автодетект пути к логам Caddy
+# Возвращает паттерн для всех *access.log файлов или конкретный путь
 function get_caddy_log_path() {
+  # Сначала проверяем наличие нескольких *access.log файлов в /var/log/caddy/
+  if [ -d "/var/log/caddy" ]; then
+    local access_logs
+    access_logs=$(find /var/log/caddy -maxdepth 1 -name "*access.log" -type f 2>/dev/null)
+    local log_count
+    log_count=$(echo "$access_logs" | grep -c . 2>/dev/null || echo 0)
+    
+    if [ "$log_count" -gt 1 ]; then
+      # Найдено несколько access.log файлов - возвращаем паттерн
+      echo "/var/log/caddy/*access.log"
+      return 0
+    elif [ "$log_count" -eq 1 ] && [ -n "$access_logs" ]; then
+      # Один файл - возвращаем его
+      echo "$access_logs"
+      return 0
+    fi
+  fi
+  
   local log_paths=(
     "/var/log/caddy/caddy.log"
     "/var/log/caddy/access.log"
@@ -1759,18 +1812,30 @@ function get_caddy_log_path() {
   
   # Проверяем Docker volumes
   local docker_log_paths=(
+    "/var/lib/docker/volumes/*caddy*/_data/*access.log"
     "/var/lib/docker/volumes/*caddy*/_data/*.log"
+    "/var/lib/docker/volumes/*caddy*/_data/logs/*access.log"
     "/var/lib/docker/volumes/*caddy*/_data/logs/*.log"
+    "/opt/docker/caddy/logs/*access.log"
     "/opt/docker/caddy/logs/*.log"
+    "/data/caddy/logs/*access.log"
     "/data/caddy/logs/*.log"
+    "$HOME/docker/caddy/logs/*access.log"
     "$HOME/docker/caddy/logs/*.log"
   )
   
   for pattern in "${docker_log_paths[@]}"; do
-    local found_path
-    found_path=$(compgen -G "$pattern" 2>/dev/null | head -1)
-    if [ -n "$found_path" ] && [ -f "$found_path" ]; then
-      echo "$found_path"
+    local found_files
+    found_files=$(compgen -G "$pattern" 2>/dev/null)
+    local count
+    count=$(echo "$found_files" | grep -c . 2>/dev/null || echo 0)
+    
+    if [ "$count" -gt 1 ]; then
+      # Несколько файлов - возвращаем паттерн
+      echo "$pattern"
+      return 0
+    elif [ "$count" -eq 1 ] && [ -n "$found_files" ] && [ -f "$found_files" ]; then
+      echo "$found_files"
       return 0
     fi
   done
@@ -1782,8 +1847,8 @@ function get_caddy_log_path() {
     return 0
   fi
   
-  # Возвращаем стандартный путь
-  echo "/var/log/caddy/access.log"
+  # Возвращаем стандартный паттерн (fail2ban поддерживает wildcards)
+  echo "/var/log/caddy/*access.log"
   return 1
 }
 
