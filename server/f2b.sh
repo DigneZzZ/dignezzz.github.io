@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Версия скрипта
-SCRIPT_VERSION="3.6.0"
+SCRIPT_VERSION="3.6.1"
 VERSION_CHECK_URL="https://raw.githubusercontent.com/DigneZzZ/dignezzz.github.io/main/server/f2b.sh"
 
 # Константы путей конфигурации
@@ -600,7 +600,77 @@ function get_jail_log_status() {
     return
   fi
   
-  # Проверяем существование файла
+  # Проверяем, является ли путь wildcard-паттерном
+  if [[ "$logpath" == *"*"* ]] || [[ "$logpath" == *"?"* ]]; then
+    local matched_files
+    matched_files=$(compgen -G "$logpath" 2>/dev/null)
+    
+    if [ -z "$matched_files" ]; then
+      echo -e "${RED}└─ ${ICON_CROSS} Логи не найдены по паттерну:${NC} ${DIM}$logpath${NC}"
+      return
+    fi
+    
+    local files_count=0
+    local total_size=0
+    local newest_time=0
+    local newest_file=""
+    
+    while IFS= read -r file; do
+      if [ -f "$file" ] && [ -r "$file" ]; then
+        files_count=$((files_count + 1))
+        local fsize fmtime
+        fsize=$(stat -c%s "$file" 2>/dev/null || stat -f%z "$file" 2>/dev/null || echo 0)
+        fmtime=$(stat -c%Y "$file" 2>/dev/null || stat -f%m "$file" 2>/dev/null || echo 0)
+        total_size=$((total_size + fsize))
+        if [ "$fmtime" -gt "$newest_time" ]; then
+          newest_time=$fmtime
+          newest_file="$file"
+        fi
+      fi
+    done <<< "$matched_files"
+    
+    if [ "$files_count" -eq 0 ]; then
+      echo -e "${RED}└─ ${ICON_CROSS} Логи не найдены по паттерну:${NC} ${DIM}$logpath${NC}"
+      return
+    fi
+    
+    # Форматируем общий размер
+    local total_size_hr
+    if [ "$total_size" -gt 1073741824 ]; then
+      total_size_hr="$(( total_size / 1073741824 ))GiB"
+    elif [ "$total_size" -gt 1048576 ]; then
+      total_size_hr="$(( total_size / 1048576 ))MiB"
+    elif [ "$total_size" -gt 1024 ]; then
+      total_size_hr="$(( total_size / 1024 ))KiB"
+    else
+      total_size_hr="${total_size}B"
+    fi
+    
+    local now age
+    now=$(date +%s)
+    age=$((now - newest_time))
+    
+    # Определяем "свежесть" лога
+    local freshness_icon freshness_text
+    if [ "$age" -lt 300 ]; then
+      freshness_icon="${GREEN}●${NC}"
+      freshness_text="активен"
+    elif [ "$age" -lt 3600 ]; then
+      freshness_icon="${YELLOW}●${NC}"
+      freshness_text="$(( age / 60 ))м назад"
+    elif [ "$age" -lt 86400 ]; then
+      freshness_icon="${ORANGE}●${NC}"
+      freshness_text="$(( age / 3600 ))ч назад"
+    else
+      freshness_icon="${RED}●${NC}"
+      freshness_text="$(( age / 86400 ))д назад"
+    fi
+    
+    echo -e "${GRAY}└─${NC} ${freshness_icon} ${CYAN}${files_count} файлов${NC} ${DIM}$logpath${NC} ${GRAY}(${total_size_hr}, ${freshness_text})${NC}"
+    return
+  fi
+  
+  # Проверяем существование файла (обычный путь без wildcard)
   if [ ! -e "$logpath" ]; then
     echo -e "${RED}└─ ${ICON_CROSS} Лог не найден:${NC} ${DIM}$logpath${NC}"
     return
