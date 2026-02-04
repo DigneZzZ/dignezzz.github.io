@@ -1,13 +1,14 @@
 #!/bin/bash
 
 # Версия скрипта
-SCRIPT_VERSION="3.6.1"
+SCRIPT_VERSION="3.7.0"
 VERSION_CHECK_URL="https://raw.githubusercontent.com/DigneZzZ/dignezzz.github.io/main/server/f2b.sh"
 
 # Константы путей конфигурации
 readonly JAIL_LOCAL="/etc/fail2ban/jail.local"
 readonly F2B_LOG="/var/log/fail2ban.log"
 readonly F2B_FILTER_DIR="/etc/fail2ban/filter.d"
+readonly LOG_REGISTRY="/etc/fail2ban/log-registry.conf"
 
 # Таймаут для fail2ban-client команд (секунды)
 readonly F2B_TIMEOUT=3
@@ -329,6 +330,286 @@ function update_script() {
   fi
 }
 
+# ============================================================================
+# РЕЕСТР ЛОГ-ФАЙЛОВ (кеширование для быстрой работы)
+# ============================================================================
+
+# Получить путь к логам из реестра для сервиса
+function get_log_from_registry() {
+  local service="$1"
+  if [ -f "$LOG_REGISTRY" ]; then
+    grep "^${service}=" "$LOG_REGISTRY" 2>/dev/null | cut -d'=' -f2-
+  fi
+}
+
+# Сохранить путь к логам в реестр
+function save_log_to_registry() {
+  local service="$1"
+  local logpath="$2"
+  
+  # Создаём файл если не существует
+  [ ! -f "$LOG_REGISTRY" ] && touch "$LOG_REGISTRY"
+  
+  # Удаляем старую запись и добавляем новую
+  if grep -q "^${service}=" "$LOG_REGISTRY" 2>/dev/null; then
+    sed -i "/^${service}=/d" "$LOG_REGISTRY"
+  fi
+  echo "${service}=${logpath}" >> "$LOG_REGISTRY"
+}
+
+# Получить статистику логов из реестра (быстро, без поиска на диске)
+function get_registry_log_status() {
+  local logpath="$1"
+  
+  if [ -z "$logpath" ]; then
+    echo -e "${GRAY}└─ ${DIM}Лог: не настроен${NC}"
+    return
+  fi
+  
+  if [ "$logpath" = "systemd" ] || [ "$logpath" = "systemd-journal" ]; then
+    echo -e "${CYAN}└─ ${ICON_INFO} Лог: systemd journal${NC}"
+    return
+  fi
+  
+  # Проверяем является ли путь списком файлов (через запятую или пробел)
+  # Или паттерном с *
+  if [[ "$logpath" == *","* ]] || [[ "$logpath" == *" "* ]]; then
+    # Несколько файлов через разделитель
+    local files_count=0
+    local total_size=0
+    local newest_time=0
+    
+    # Заменяем запятые на пробелы для итерации
+    for file in ${logpath//,/ }; do
+      if [ -f "$file" ]; then
+        files_count=$((files_count + 1))
+        local fsize fmtime
+        fsize=$(stat -c%s "$file" 2>/dev/null || echo 0)
+        fmtime=$(stat -c%Y "$file" 2>/dev/null || echo 0)
+        total_size=$((total_size + fsize))
+        [ "$fmtime" -gt "$newest_time" ] && newest_time=$fmtime
+      fi
+    done
+    
+    if [ "$files_count" -eq 0 ]; then
+      echo -e "${RED}└─ ${ICON_CROSS} Логи не найдены${NC}"
+      return
+    fi
+    
+    # Форматируем размер
+    local size_hr
+    if [ "$total_size" -gt 1048576 ]; then
+      size_hr="$(( total_size / 1048576 ))MiB"
+    elif [ "$total_size" -gt 1024 ]; then
+      size_hr="$(( total_size / 1024 ))KiB"
+    else
+      size_hr="${total_size}B"
+    fi
+    
+    # Свежесть
+    local now=$(($(date +%s)))
+    local age=$((now - newest_time))
+    local fresh_icon fresh_text
+    if [ "$age" -lt 300 ]; then
+      fresh_icon="${GREEN}●${NC}"; fresh_text="активен"
+    elif [ "$age" -lt 3600 ]; then
+      fresh_icon="${YELLOW}●${NC}"; fresh_text="$(( age / 60 ))м назад"
+    elif [ "$age" -lt 86400 ]; then
+      fresh_icon="${ORANGE}●${NC}"; fresh_text="$(( age / 3600 ))ч назад"
+    else
+      fresh_icon="${RED}●${NC}"; fresh_text="$(( age / 86400 ))д назад"
+    fi
+    
+    echo -e "${GRAY}└─${NC} ${fresh_icon} ${CYAN}${files_count} файл(ов)${NC} ${GRAY}(${size_hr}, ${fresh_text})${NC}"
+    return
+  fi
+  
+  # Одиночный файл
+  if [ ! -f "$logpath" ]; then
+    echo -e "${RED}└─ ${ICON_CROSS} Лог не найден:${NC} ${DIM}$logpath${NC}"
+    return
+  fi
+  
+  local file_size last_modified
+  file_size=$(stat -c%s "$logpath" 2>/dev/null || echo 0)
+  last_modified=$(stat -c%Y "$logpath" 2>/dev/null || echo 0)
+  
+  local size_hr
+  if [ "$file_size" -gt 1048576 ]; then
+    size_hr="$(( file_size / 1048576 ))MiB"
+  elif [ "$file_size" -gt 1024 ]; then
+    size_hr="$(( file_size / 1024 ))KiB"
+  else
+    size_hr="${file_size}B"
+  fi
+  
+  local now=$(($(date +%s)))
+  local age=$((now - last_modified))
+  local fresh_icon fresh_text
+  if [ "$age" -lt 300 ]; then
+    fresh_icon="${GREEN}●${NC}"; fresh_text="активен"
+  elif [ "$age" -lt 3600 ]; then
+    fresh_icon="${YELLOW}●${NC}"; fresh_text="$(( age / 60 ))м назад"
+  elif [ "$age" -lt 86400 ]; then
+    fresh_icon="${ORANGE}●${NC}"; fresh_text="$(( age / 3600 ))ч назад"
+  else
+    fresh_icon="${RED}●${NC}"; fresh_text="$(( age / 86400 ))д назад"
+  fi
+  
+  echo -e "${GRAY}└─${NC} ${fresh_icon} ${DIM}$(basename "$logpath")${NC} ${GRAY}(${size_hr}, ${fresh_text})${NC}"
+}
+
+# Сканировать и обновить реестр логов для Caddy
+function scan_caddy_logs() {
+  echo -e "${CYAN}${ICON_GEAR} Сканирование логов Caddy...${NC}"
+  
+  local found_logs=""
+  local count=0
+  
+  # Проверяем /var/log/caddy/
+  if [ -d "/var/log/caddy" ]; then
+    for file in /var/log/caddy/*access.log; do
+      if [ -f "$file" ]; then
+        [ -n "$found_logs" ] && found_logs="${found_logs},"
+        found_logs="${found_logs}${file}"
+        count=$((count + 1))
+        echo -e "  ${GREEN}${ICON_CHECK}${NC} $(basename "$file")"
+      fi
+    done
+    
+    # Если нет *access.log, ищем другие логи
+    if [ "$count" -eq 0 ]; then
+      for file in /var/log/caddy/*.log; do
+        if [ -f "$file" ]; then
+          [ -n "$found_logs" ] && found_logs="${found_logs},"
+          found_logs="${found_logs}${file}"
+          count=$((count + 1))
+          echo -e "  ${GREEN}${ICON_CHECK}${NC} $(basename "$file")"
+        fi
+      done
+    fi
+  fi
+  
+  # Проверяем Docker пути
+  local docker_dirs=("/opt/docker/caddy/logs" "/data/caddy/logs")
+  for dir in "${docker_dirs[@]}"; do
+    if [ -d "$dir" ]; then
+      for file in "$dir"/*access.log "$dir"/*.log; do
+        if [ -f "$file" ]; then
+          [ -n "$found_logs" ] && found_logs="${found_logs},"
+          found_logs="${found_logs}${file}"
+          count=$((count + 1))
+          echo -e "  ${GREEN}${ICON_CHECK}${NC} $file"
+        fi
+      done
+    fi
+  done
+  
+  if [ "$count" -eq 0 ]; then
+    echo -e "  ${YELLOW}${ICON_WARNING} Логи Caddy не найдены${NC}"
+    echo -e "  ${GRAY}Убедитесь, что в Caddyfile настроено логирование:${NC}"
+    echo -e "  ${GRAY}  log {${NC}"
+    echo -e "  ${GRAY}    output file /var/log/caddy/site.access.log${NC}"
+    echo -e "  ${GRAY}  }${NC}"
+    return 1
+  fi
+  
+  save_log_to_registry "caddy" "$found_logs"
+  echo -e "${GREEN}${ICON_CHECK} Найдено ${count} лог-файлов, сохранено в реестр${NC}"
+  return 0
+}
+
+# Сканировать все сервисы и обновить реестр
+function scan_all_logs() {
+  echo -e "${BOLD}${CYAN}${ICON_GEAR} Сканирование лог-файлов...${NC}"
+  echo ""
+  
+  # SSH
+  echo -e "${BLUE}SSH:${NC}"
+  if [ -f "/var/log/auth.log" ]; then
+    save_log_to_registry "sshd" "/var/log/auth.log"
+    echo -e "  ${GREEN}${ICON_CHECK}${NC} /var/log/auth.log"
+  elif [ -f "/var/log/secure" ]; then
+    save_log_to_registry "sshd" "/var/log/secure"
+    echo -e "  ${GREEN}${ICON_CHECK}${NC} /var/log/secure"
+  else
+    save_log_to_registry "sshd" "systemd"
+    echo -e "  ${CYAN}${ICON_INFO}${NC} systemd journal"
+  fi
+  echo ""
+  
+  # Nginx
+  echo -e "${BLUE}Nginx:${NC}"
+  if [ -d "/var/log/nginx" ]; then
+    local nginx_logs=""
+    for file in /var/log/nginx/access.log /var/log/nginx/error.log; do
+      if [ -f "$file" ]; then
+        [ -n "$nginx_logs" ] && nginx_logs="${nginx_logs},"
+        nginx_logs="${nginx_logs}${file}"
+        echo -e "  ${GREEN}${ICON_CHECK}${NC} $(basename "$file")"
+      fi
+    done
+    [ -n "$nginx_logs" ] && save_log_to_registry "nginx" "$nginx_logs"
+  else
+    echo -e "  ${GRAY}Не установлен${NC}"
+  fi
+  echo ""
+  
+  # Caddy
+  echo -e "${BLUE}Caddy:${NC}"
+  scan_caddy_logs
+  echo ""
+  
+  # MySQL
+  echo -e "${BLUE}MySQL/MariaDB:${NC}"
+  if [ -f "/var/log/mysql/error.log" ]; then
+    save_log_to_registry "mysql" "/var/log/mysql/error.log"
+    echo -e "  ${GREEN}${ICON_CHECK}${NC} /var/log/mysql/error.log"
+  elif [ -f "/var/log/mariadb/mariadb.log" ]; then
+    save_log_to_registry "mysql" "/var/log/mariadb/mariadb.log"
+    echo -e "  ${GREEN}${ICON_CHECK}${NC} /var/log/mariadb/mariadb.log"
+  else
+    echo -e "  ${GRAY}Не установлен${NC}"
+  fi
+  echo ""
+  
+  echo -e "${GREEN}${ICON_CHECK} Реестр логов обновлён: ${LOG_REGISTRY}${NC}"
+}
+
+# Показать содержимое реестра
+function show_log_registry() {
+  echo -e "${BOLD}${CYAN}${ICON_BOOK} Реестр лог-файлов${NC}"
+  echo -e "${GRAY}Файл: ${LOG_REGISTRY}${NC}"
+  echo ""
+  
+  if [ ! -f "$LOG_REGISTRY" ]; then
+    echo -e "${YELLOW}${ICON_WARNING} Реестр пуст. Запустите сканирование.${NC}"
+    return
+  fi
+  
+  while IFS='=' read -r service logpath; do
+    [ -z "$service" ] && continue
+    echo -e "${CYAN}${service}:${NC}"
+    if [[ "$logpath" == *","* ]]; then
+      for file in ${logpath//,/ }; do
+        if [ -f "$file" ]; then
+          echo -e "  ${GREEN}${ICON_CHECK}${NC} $file"
+        else
+          echo -e "  ${RED}${ICON_CROSS}${NC} $file ${DIM}(не найден)${NC}"
+        fi
+      done
+    else
+      if [ -f "$logpath" ] || [ "$logpath" = "systemd" ] || [ "$logpath" = "systemd-journal" ]; then
+        echo -e "  ${GREEN}${ICON_CHECK}${NC} $logpath"
+      else
+        echo -e "  ${RED}${ICON_CROSS}${NC} $logpath ${DIM}(не найден)${NC}"
+      fi
+    fi
+  done < "$LOG_REGISTRY"
+}
+
+# ============================================================================
+
 function check_root() {
   if [ "$EUID" -ne 0 ]; then
     echo -e "${RED}Please run this script as root.${NC}"
@@ -339,9 +620,6 @@ function check_root() {
 function show_statistics() {
   echo -e "${BOLD}${CYAN}${ICON_CHART} СТАТИСТИКА FAIL2BAN${NC}"
   echo ""
-  
-  # Фоновая проверка версии (с таймаутом, не блокирует)
-  check_version > /dev/null 2>&1 &
   
   # Проверка статуса сервиса
   if systemctl is-active --quiet fail2ban; then
@@ -456,9 +734,11 @@ function show_jail_stats() {
       status_color="${YELLOW}"
     fi
     
-    # Получаем путь к логу
-    local logpath=$(get_jail_logpath "$jail")
-    local log_status=$(get_jail_log_status "$logpath")
+    # Сначала проверяем реестр, потом jail.local
+    local logpath
+    logpath=$(get_log_from_registry "$jail")
+    [ -z "$logpath" ] && logpath=$(get_jail_logpath "$jail")
+    local log_status=$(get_registry_log_status "$logpath")
     
     echo -e "${indent}${status_color}${status_icon} ${BOLD}$jail${NC} ${GRAY}│${NC} Попытки: ${YELLOW}${currently_failed:-0}${NC}/${DIM}${total_failed:-0}${NC} ${GRAY}│${NC} Блоки: ${RED}${currently_banned:-0}${NC}/${DIM}${total_banned:-0}${NC}"
     echo -e "${indent}   ${log_status}"
@@ -551,14 +831,12 @@ function get_jail_logpath() {
       echo "systemd"
       ;;
     caddy)
-      # Проверяем наличие нескольких *access.log файлов
-      if [ -d "/var/log/caddy" ]; then
-        local access_logs
-        access_logs=$(find /var/log/caddy -maxdepth 1 -name "*access.log" -type f 2>/dev/null | head -1)
-        if [ -n "$access_logs" ]; then
-          echo "/var/log/caddy/*access.log"
-          return
-        fi
+      # Используем реестр или стандартные пути
+      local caddy_reg
+      caddy_reg=$(get_log_from_registry "caddy")
+      if [ -n "$caddy_reg" ]; then
+        echo "$caddy_reg"
+        return
       fi
       for p in /var/log/caddy/access.log /var/log/caddy/caddy.log; do
         [ -f "$p" ] && { echo "$p"; return; }
@@ -583,142 +861,6 @@ function get_jail_logpath() {
       [ -f /var/log/mail.log ] && { echo "/var/log/mail.log"; return; }
       ;;
   esac
-}
-
-# Проверка статуса лог-файла для jail'а (принимает путь к логу)
-function get_jail_log_status() {
-  local logpath="$1"
-  
-  if [ -z "$logpath" ]; then
-    echo -e "${GRAY}└─ ${DIM}Лог: путь не определён${NC}"
-    return
-  fi
-  
-  # Если используется systemd journal
-  if [ "$logpath" = "systemd" ]; then
-    echo -e "${CYAN}└─ ${ICON_INFO} Лог: systemd journal${NC}"
-    return
-  fi
-  
-  # Проверяем, является ли путь wildcard-паттерном
-  if [[ "$logpath" == *"*"* ]] || [[ "$logpath" == *"?"* ]]; then
-    local matched_files
-    matched_files=$(compgen -G "$logpath" 2>/dev/null)
-    
-    if [ -z "$matched_files" ]; then
-      echo -e "${RED}└─ ${ICON_CROSS} Логи не найдены по паттерну:${NC} ${DIM}$logpath${NC}"
-      return
-    fi
-    
-    local files_count=0
-    local total_size=0
-    local newest_time=0
-    local newest_file=""
-    
-    while IFS= read -r file; do
-      if [ -f "$file" ] && [ -r "$file" ]; then
-        files_count=$((files_count + 1))
-        local fsize fmtime
-        fsize=$(stat -c%s "$file" 2>/dev/null || stat -f%z "$file" 2>/dev/null || echo 0)
-        fmtime=$(stat -c%Y "$file" 2>/dev/null || stat -f%m "$file" 2>/dev/null || echo 0)
-        total_size=$((total_size + fsize))
-        if [ "$fmtime" -gt "$newest_time" ]; then
-          newest_time=$fmtime
-          newest_file="$file"
-        fi
-      fi
-    done <<< "$matched_files"
-    
-    if [ "$files_count" -eq 0 ]; then
-      echo -e "${RED}└─ ${ICON_CROSS} Логи не найдены по паттерну:${NC} ${DIM}$logpath${NC}"
-      return
-    fi
-    
-    # Форматируем общий размер
-    local total_size_hr
-    if [ "$total_size" -gt 1073741824 ]; then
-      total_size_hr="$(( total_size / 1073741824 ))GiB"
-    elif [ "$total_size" -gt 1048576 ]; then
-      total_size_hr="$(( total_size / 1048576 ))MiB"
-    elif [ "$total_size" -gt 1024 ]; then
-      total_size_hr="$(( total_size / 1024 ))KiB"
-    else
-      total_size_hr="${total_size}B"
-    fi
-    
-    local now age
-    now=$(date +%s)
-    age=$((now - newest_time))
-    
-    # Определяем "свежесть" лога
-    local freshness_icon freshness_text
-    if [ "$age" -lt 300 ]; then
-      freshness_icon="${GREEN}●${NC}"
-      freshness_text="активен"
-    elif [ "$age" -lt 3600 ]; then
-      freshness_icon="${YELLOW}●${NC}"
-      freshness_text="$(( age / 60 ))м назад"
-    elif [ "$age" -lt 86400 ]; then
-      freshness_icon="${ORANGE}●${NC}"
-      freshness_text="$(( age / 3600 ))ч назад"
-    else
-      freshness_icon="${RED}●${NC}"
-      freshness_text="$(( age / 86400 ))д назад"
-    fi
-    
-    echo -e "${GRAY}└─${NC} ${freshness_icon} ${CYAN}${files_count} файлов${NC} ${DIM}$logpath${NC} ${GRAY}(${total_size_hr}, ${freshness_text})${NC}"
-    return
-  fi
-  
-  # Проверяем существование файла (обычный путь без wildcard)
-  if [ ! -e "$logpath" ]; then
-    echo -e "${RED}└─ ${ICON_CROSS} Лог не найден:${NC} ${DIM}$logpath${NC}"
-    return
-  fi
-  
-  if [ ! -r "$logpath" ]; then
-    echo -e "${RED}└─ ${ICON_CROSS} Лог недоступен для чтения:${NC} ${DIM}$logpath${NC}"
-    return
-  fi
-  
-  # Получаем информацию о файле (только stat, без wc -l для скорости)
-  local file_size last_modified
-  file_size=$(stat -c%s "$logpath" 2>/dev/null || stat -f%z "$logpath" 2>/dev/null)
-  last_modified=$(stat -c%Y "$logpath" 2>/dev/null || stat -f%m "$logpath" 2>/dev/null)
-  
-  # Форматируем размер
-  local file_size_hr
-  if [ "$file_size" -gt 1073741824 ]; then
-    file_size_hr="$(( file_size / 1073741824 ))GiB"
-  elif [ "$file_size" -gt 1048576 ]; then
-    file_size_hr="$(( file_size / 1048576 ))MiB"
-  elif [ "$file_size" -gt 1024 ]; then
-    file_size_hr="$(( file_size / 1024 ))KiB"
-  else
-    file_size_hr="${file_size}B"
-  fi
-  
-  local now age
-  now=$(date +%s)
-  age=$((now - last_modified))
-  
-  # Определяем "свежесть" лога
-  local freshness_icon freshness_text
-  if [ "$age" -lt 300 ]; then
-    freshness_icon="${GREEN}●${NC}"
-    freshness_text="активен"
-  elif [ "$age" -lt 3600 ]; then
-    freshness_icon="${YELLOW}●${NC}"
-    freshness_text="$(( age / 60 ))м назад"
-  elif [ "$age" -lt 86400 ]; then
-    freshness_icon="${ORANGE}●${NC}"
-    freshness_text="$(( age / 3600 ))ч назад"
-  else
-    freshness_icon="${RED}●${NC}"
-    freshness_text="$(( age / 86400 ))д назад"
-  fi
-  
-  echo -e "${GRAY}└─${NC} ${freshness_icon} ${DIM}$logpath${NC} ${GRAY}(${file_size_hr}, ${freshness_text})${NC}"
 }
 
 function check_ssh_port_consistency_quiet() {
@@ -912,9 +1054,14 @@ function display_interactive_menu() {
   echo -e " ${CYAN}14${NC}  🗑️  Удалить f2b команду из системы"
   echo ""
   
+  echo -e "${DIM}Реестр логов:${NC}"
+  echo -e " ${CYAN}15${NC}  📋 Показать реестр лог-файлов"
+  echo -e " ${CYAN}16${NC}  🔍 Сканировать и обновить реестр логов"
+  echo ""
+  
   echo -e "  ${RED}0${NC}  Выход"
   echo ""
-  echo -ne "${YELLOW}${ICON_ARROW}${NC} Выберите опцию ${DIM}[0-14]${NC}: "
+  echo -ne "${YELLOW}${ICON_ARROW}${NC} Выберите опцию ${DIM}[0-16]${NC}: "
 }
 
 # Helper function: Show detailed status for all jails
@@ -1274,61 +1421,41 @@ EOF
       # Создаем фильтр для Caddy (его нет в стандартном fail2ban)
       create_caddy_filter
       
-      # Автодетект пути к логам
+      # Сначала проверяем реестр
       local caddy_log
-      caddy_log=$(get_caddy_log_path)
+      caddy_log=$(get_log_from_registry "caddy")
       
-      if [ "$caddy_log" = "systemd-journal" ]; then
-        echo -e "${CYAN}${ICON_INFO} Caddy использует systemd journal для логирования${NC}"
-        echo -e "${YELLOW}${ICON_WARNING} Для работы Fail2ban настройте логирование Caddy в файл${NC}"
-        echo -e "${GRAY}   В Caddyfile добавьте для каждого сайта:${NC}"
-        echo -e "${GRAY}   log {${NC}"
-        echo -e "${GRAY}     output file /var/log/caddy/site.domain.access.log${NC}"
-        echo -e "${GRAY}     format json${NC}"
-        echo -e "${GRAY}   }${NC}"
-        return 1
-      fi
-      
-      # Проверяем, является ли путь паттерном с wildcard
-      local is_pattern=false
-      if [[ "$caddy_log" == *"*"* ]]; then
-        is_pattern=true
-        # Проверяем, есть ли файлы по паттерну
-        local pattern_files
-        pattern_files=$(compgen -G "$caddy_log" 2>/dev/null)
-        if [ -z "$pattern_files" ]; then
-          echo -e "${YELLOW}${ICON_WARNING} Логи Caddy не найдены по паттерну: ${caddy_log}${NC}"
-          is_pattern=false
+      if [ -z "$caddy_log" ]; then
+        # Нет в реестре - сканируем
+        echo -e "${CYAN}${ICON_INFO} Сканирование лог-файлов Caddy...${NC}"
+        if ! scan_caddy_logs; then
+          echo -e "${YELLOW}${ICON_WARNING} Логи не найдены автоматически${NC}"
+          echo -e "${GRAY}Убедитесь, что в Caddyfile настроено логирование:${NC}"
+          echo -e "${GRAY}  log {${NC}"
+          echo -e "${GRAY}    output file /var/log/caddy/site.access.log${NC}"
+          echo -e "${GRAY}    format json${NC}"
+          echo -e "${GRAY}  }${NC}"
+          echo ""
+          echo -ne "${CYAN}Введите путь к логам через запятую (или Enter для пропуска):${NC} "
+          read -r manual_path
+          if [ -n "$manual_path" ]; then
+            save_log_to_registry "caddy" "$manual_path"
+            caddy_log="$manual_path"
+          else
+            return 1
+          fi
         else
-          local files_count
-          files_count=$(echo "$pattern_files" | wc -l)
-          echo -e "${CYAN}${ICON_INFO} Найдено ${files_count} лог-файлов Caddy:${NC}"
-          echo "$pattern_files" | while read -r f; do
-            echo -e "${GRAY}   - $(basename "$f")${NC}"
-          done
+          caddy_log=$(get_log_from_registry "caddy")
         fi
       fi
       
-      if [ "$is_pattern" = false ] && [ ! -f "$caddy_log" ]; then
-        echo -e "${YELLOW}${ICON_WARNING} Лог Caddy не найден: ${caddy_log}${NC}"
-        if is_service_in_docker "caddy"; then
-          echo -e "${CYAN}${ICON_INFO} Caddy работает в Docker. Убедитесь, что логи примонтированы.${NC}"
-          echo -e "${GRAY}   Пример: -v /var/log/caddy:/var/log/caddy${NC}"
-        fi
-        echo -ne "${CYAN}Введите путь к логу вручную (или Enter для /var/log/caddy/*access.log):${NC} "
-        read -r manual_path
-        if [ -n "$manual_path" ]; then
-          caddy_log="$manual_path"
-        else
-          caddy_log="/var/log/caddy/*access.log"
-        fi
-      fi
+      echo -e "${GREEN}${ICON_CHECK} Используем логи из реестра${NC}"
       
-      echo -e "${GREEN}${ICON_CHECK} Используем лог: ${caddy_log}${NC}"
-      if [[ "$caddy_log" == *"*"* ]]; then
-        echo -e "${CYAN}${ICON_INFO} Паттерн позволяет мониторить все *access.log файлы${NC}"
-      fi
-      add_jail_config "$service" "enabled = true" "port = http,https" "filter = caddy-auth" "logpath = $caddy_log" "maxretry = 3" "bantime = 600"
+      # Формируем logpath для fail2ban (через перевод строки)
+      local f2b_logpath
+      f2b_logpath=$(echo "$caddy_log" | tr ',' '\n' | sed 's/^/       /' | sed '1s/^ *//')
+      
+      add_jail_config "$service" "enabled = true" "port = http,https" "filter = caddy-auth" "logpath = $f2b_logpath" "maxretry = 3" "bantime = 600"
       ;;
     "mysql")
       local mysql_log
@@ -1560,20 +1687,10 @@ function toggle_fail2ban() {
 }
 
 function interactive_menu() {
-  # Автоматическая проверка версии при запуске
-  local version_check_result=""
-  if ! check_version > /dev/null 2>&1; then
-    version_check_result="${YELLOW}⚠️ New version available!${NC}"
-  fi
+  # Версия проверяется вручную через пункт меню 12
   
   while true; do
     print_header
-    
-    # Показываем уведомление об обновлении если есть
-    if [ -n "$version_check_result" ]; then
-      echo -e "$version_check_result"
-      echo ""
-    fi
     
     show_statistics
     display_interactive_menu
@@ -1639,7 +1756,6 @@ function interactive_menu() {
       12)
         echo ""
         check_version
-        version_check_result=""  # Сбрасываем уведомление после проверки
         ;;
       13)
         echo -ne "${CYAN}Enter download URL (or press Enter to use current script):${NC} "
@@ -1648,6 +1764,14 @@ function interactive_menu() {
         ;;
       14)
         uninstall_script_from_system
+        ;;
+      15)
+        echo ""
+        show_log_registry
+        ;;
+      16)
+        echo ""
+        scan_all_logs
         ;;
       0)
         echo -e "${GREEN}Goodbye!${NC}"
@@ -1842,83 +1966,29 @@ function get_nginx_log_path() {
   return 1
 }
 
-# Автодетект пути к логам Caddy
-# Возвращает паттерн для всех *access.log файлов или конкретный путь
+# Получить путь к логам Caddy (из реестра или стандартный)
 function get_caddy_log_path() {
-  # Сначала проверяем наличие нескольких *access.log файлов в /var/log/caddy/
-  if [ -d "/var/log/caddy" ]; then
-    local access_logs
-    access_logs=$(find /var/log/caddy -maxdepth 1 -name "*access.log" -type f 2>/dev/null)
-    local log_count
-    log_count=$(echo "$access_logs" | grep -c . 2>/dev/null || echo 0)
-    
-    if [ "$log_count" -gt 1 ]; then
-      # Найдено несколько access.log файлов - возвращаем паттерн
-      echo "/var/log/caddy/*access.log"
-      return 0
-    elif [ "$log_count" -eq 1 ] && [ -n "$access_logs" ]; then
-      # Один файл - возвращаем его
-      echo "$access_logs"
-      return 0
-    fi
-  fi
-  
-  local log_paths=(
-    "/var/log/caddy/caddy.log"
-    "/var/log/caddy/access.log"
-    "/var/log/caddy/errors.log"
-    "/var/log/caddy.log"
-    "/opt/caddy/logs/access.log"
-    "$HOME/.local/share/caddy/caddy.log"
-  )
-  
-  # Проверяем стандартные пути
-  for path in "${log_paths[@]}"; do
-    if [ -f "$path" ]; then
-      echo "$path"
-      return 0
-    fi
-  done
-  
-  # Проверяем Docker volumes
-  local docker_log_paths=(
-    "/var/lib/docker/volumes/*caddy*/_data/*access.log"
-    "/var/lib/docker/volumes/*caddy*/_data/*.log"
-    "/var/lib/docker/volumes/*caddy*/_data/logs/*access.log"
-    "/var/lib/docker/volumes/*caddy*/_data/logs/*.log"
-    "/opt/docker/caddy/logs/*access.log"
-    "/opt/docker/caddy/logs/*.log"
-    "/data/caddy/logs/*access.log"
-    "/data/caddy/logs/*.log"
-    "$HOME/docker/caddy/logs/*access.log"
-    "$HOME/docker/caddy/logs/*.log"
-  )
-  
-  for pattern in "${docker_log_paths[@]}"; do
-    local found_files
-    found_files=$(compgen -G "$pattern" 2>/dev/null)
-    local count
-    count=$(echo "$found_files" | grep -c . 2>/dev/null || echo 0)
-    
-    if [ "$count" -gt 1 ]; then
-      # Несколько файлов - возвращаем паттерн
-      echo "$pattern"
-      return 0
-    elif [ "$count" -eq 1 ] && [ -n "$found_files" ] && [ -f "$found_files" ]; then
-      echo "$found_files"
-      return 0
-    fi
-  done
-  
-  # Пробуем найти через systemd
-  if systemctl is-active --quiet caddy 2>/dev/null; then
-    # Caddy может логировать в journald
-    echo "systemd-journal"
+  # Сначала проверяем реестр
+  local from_registry
+  from_registry=$(get_log_from_registry "caddy")
+  if [ -n "$from_registry" ]; then
+    echo "$from_registry"
     return 0
   fi
   
-  # Возвращаем стандартный паттерн (fail2ban поддерживает wildcards)
-  echo "/var/log/caddy/*access.log"
+  # Стандартные пути (быстрая проверка без find)
+  if [ -f "/var/log/caddy/access.log" ]; then
+    echo "/var/log/caddy/access.log"
+    return 0
+  fi
+  
+  if [ -f "/var/log/caddy/caddy.log" ]; then
+    echo "/var/log/caddy/caddy.log"
+    return 0
+  fi
+  
+  # Нет в реестре и нет стандартных файлов - нужно сканирование
+  echo ""
   return 1
 }
 
