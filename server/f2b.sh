@@ -698,7 +698,8 @@ function show_statistics() {
       if [ -n "$recent_bans" ]; then
         echo "$recent_bans" | while read -r line; do
           local timestamp=$(echo "$line" | cut -d' ' -f1-2)
-          local ip=$(echo "$line" | grep -o '[0-9]\+\.[0-9]\+\.[0-9]\+\.[0-9]\+')
+          # Извлекаем IP после слова "Ban "
+          local ip=$(echo "$line" | sed -n 's/.*Ban \([0-9.]*\).*/\1/p')
           local jail=$(echo "$line" | grep -o '\[.*\]' | tr -d '[]')
           echo -e "  ${RED}$timestamp${NC} - IP: ${YELLOW}$ip${NC} (${CYAN}$jail${NC})"
         done
@@ -2051,9 +2052,10 @@ function create_caddy_filter() {
 # Отключаем стандартный datepattern - Caddy использует Unix timestamp
 datepattern = ^
 
-# Простые паттерны для Caddy JSON - ищем IP и status в одной строке
-failregex = remote_ip.*<HOST>.*status.*(401|403)
-            client_ip.*<HOST>.*status.*(401|403)
+# IP идет сразу после "remote_ip":" или "client_ip":"
+# Кавычки ограничивают захват только IP адреса
+failregex = "remote_ip":"<HOST>".*"status":(401|403)
+            "client_ip":"<HOST>".*"status":(401|403)
             
 # Common Log Format (CLF) fallback
             ^<HOST> - .* "(GET|POST|HEAD|PUT|DELETE).*" (401|403) .*$
