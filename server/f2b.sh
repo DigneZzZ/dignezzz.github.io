@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Версия скрипта
-SCRIPT_VERSION="3.7.0"
+SCRIPT_VERSION="3.7.3"
 VERSION_CHECK_URL="https://raw.githubusercontent.com/DigneZzZ/dignezzz.github.io/main/server/f2b.sh"
 
 # Константы путей конфигурации
@@ -1455,7 +1455,8 @@ EOF
       local f2b_logpath
       f2b_logpath=$(echo "$caddy_log" | tr ',' '\n' | sed 's/^/       /' | sed '1s/^ *//')
       
-      add_jail_config "$service" "enabled = true" "port = http,https" "filter = caddy-auth" "logpath = $f2b_logpath" "maxretry = 3" "bantime = 600"
+      # backend = auto чтобы читать из файлов, а не journald
+      add_jail_config "$service" "enabled = true" "port = http,https" "filter = caddy-auth" "backend = auto" "logpath = $f2b_logpath" "maxretry = 3" "bantime = 600"
       ;;
     "mysql")
       local mysql_log
@@ -2038,31 +2039,30 @@ function create_caddy_filter() {
     mkdir -p "$F2B_FILTER_DIR"
   fi
   
-  # Создаем фильтр только если его нет
-  if [ ! -f "$filter_file" ]; then
-    cat > "$filter_file" <<'EOF'
-# Fail2Ban filter for Caddy web server
-# Matches failed authentication attempts and suspicious requests
+  # Создаем/обновляем фильтр для Caddy JSON логов
+  cat > "$filter_file" <<'EOF'
+# Fail2Ban filter for Caddy web server (JSON format)
+#
+# Caddy JSON log structure:
+# {"level":"info","ts":...,"request":{"remote_ip":"1.2.3.4","client_ip":"1.2.3.4",...},"status":401,...}
 
 [Definition]
 
-# Caddy JSON log format (common setup)
-# Match 401/403 responses
-failregex = ^.*"client_ip":\s*"<HOST>".*"status":\s*(401|403).*$
-            ^.*"remote_ip":\s*"<HOST>".*"status":\s*(401|403).*$
-            ^<HOST> - .* "(GET|POST|HEAD|PUT|DELETE|PATCH).*" (401|403) .*$
-            ^.*"request":\{.*"remote_ip":\s*"<HOST>".*"status":\s*(401|403).*$
+# Отключаем стандартный datepattern - Caddy использует Unix timestamp
+datepattern = ^
 
-# Common Log Format fallback
-# ^<HOST> - .* \[.*\] ".*" (401|403) .*$
+# Простые паттерны для Caddy JSON - ищем IP и status в одной строке
+failregex = remote_ip.*<HOST>.*status.*(401|403)
+            client_ip.*<HOST>.*status.*(401|403)
+            
+# Common Log Format (CLF) fallback
+            ^<HOST> - .* "(GET|POST|HEAD|PUT|DELETE).*" (401|403) .*$
 
 ignoreregex =
 
-# Author: f2b.sh auto-generated
+# Author: f2b.sh auto-generated for Caddy JSON logs
 EOF
-    echo -e "${GREEN}${ICON_CHECK} Создан фильтр Caddy: ${filter_file}${NC}"
-    return 0
-  fi
+  echo -e "${GREEN}${ICON_CHECK} Создан/обновлён фильтр Caddy: ${filter_file}${NC}"
   return 0
 }
 
