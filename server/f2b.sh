@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Версия скрипта
-SCRIPT_VERSION="3.7.3"
+SCRIPT_VERSION="3.7.5"
 VERSION_CHECK_URL="https://raw.githubusercontent.com/DigneZzZ/dignezzz.github.io/main/server/f2b.sh"
 
 # Константы путей конфигурации
@@ -124,10 +124,10 @@ if [[ "$(basename "$0")" == "f2b" ]] && [[ $# -gt 0 ]]; then
     recent)
       echo "Recent bans (last 10):"
       if [ -f "$F2B_LOG" ]; then
-        grep "Ban " "$F2B_LOG" | tail -10 | while read line; do
+        grep 'fail2ban.actions.*\] Ban ' "$F2B_LOG" | tail -10 | while read line; do
           DATE=$(echo "$line" | awk '{print $1, $2}')
-          IP=$(echo "$line" | grep -o '[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}')
-          JAIL=$(echo "$line" | grep -o '\[.*\]' | tr -d '[]')
+          JAIL=$(echo "$line" | sed -n 's/.*\[\([^]]*\)\] .*Ban \(.*\)/\1/p')
+          IP=$(echo "$line" | awk '{print $NF}')
           echo "$DATE - $IP ($JAIL)"
         done
       else
@@ -694,13 +694,14 @@ function show_statistics() {
     # Последние баны
     echo -e "${CYAN}📋 Recent Bans (last 5):${NC}"
     if [ -f "$F2B_LOG" ]; then
-      local recent_bans=$(grep "Ban " "$F2B_LOG" | tail -5)
+      local recent_bans=$(grep 'fail2ban.actions.*\] Ban ' "$F2B_LOG" | tail -5)
       if [ -n "$recent_bans" ]; then
         echo "$recent_bans" | while read -r line; do
           local timestamp=$(echo "$line" | cut -d' ' -f1-2)
-          # Извлекаем IP после слова "Ban "
-          local ip=$(echo "$line" | sed -n 's/.*Ban \([0-9.]*\).*/\1/p')
-          local jail=$(echo "$line" | grep -o '\[.*\]' | tr -d '[]')
+          # Извлекаем jail из [...] перед словом Ban
+          local jail=$(echo "$line" | sed -n 's/.*\[\([^]]*\)\] Ban.*/\1/p')
+          # Извлекаем IP — последнее слово в строке (после Ban)
+          local ip=$(echo "$line" | awk '{print $NF}')
           echo -e "  ${RED}$timestamp${NC} - IP: ${YELLOW}$ip${NC} (${CYAN}$jail${NC})"
         done
       else
@@ -887,10 +888,11 @@ function show_recent_bans() {
   echo ""
   
   if [ -f "$F2B_LOG" ]; then
-    grep "Ban " "$F2B_LOG" | tail -10 | while read line; do
+    grep 'fail2ban.actions.*\] Ban ' "$F2B_LOG" | tail -10 | while read line; do
       DATE=$(echo "$line" | awk '{print $1, $2}')
-      IP=$(echo "$line" | grep -o '[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}')
-      echo -e "  ${GRAY}${DATE}${NC} ${GRAY}│${NC} ${RED}${ICON_CROSS} ${BOLD}$IP${NC}"
+      JAIL=$(echo "$line" | sed -n 's/.*\[\([^]]*\)\] .*Ban \(.*\)/\1/p')
+      IP=$(echo "$line" | awk '{print $NF}')
+      echo -e "  ${GRAY}${DATE}${NC} ${GRAY}│${NC} ${RED}${ICON_CROSS} ${BOLD}$IP${NC} ${GRAY}(${CYAN}$JAIL${GRAY})${NC}"
     done
   else
     echo -e "  ${RED}${ICON_CROSS} Лог Fail2ban не найден${NC}"
@@ -2045,20 +2047,21 @@ function create_caddy_filter() {
 # Fail2Ban filter for Caddy web server (JSON format)
 #
 # Caddy JSON log structure:
-# {"level":"info","ts":...,"request":{"remote_ip":"1.2.3.4","client_ip":"1.2.3.4",...},"status":401,...}
+# {"level":"info","ts":1770365890.48,"logger":"http.log.access.log0","msg":"handled request",
+#  "request":{"remote_ip":"1.2.3.4","client_ip":"1.2.3.4",...},...,"status":401,...}
 
 [Definition]
 
-# Отключаем стандартный datepattern - Caddy использует Unix timestamp
-datepattern = ^
+# Caddy использует Unix epoch timestamp в поле "ts"
+datepattern = "ts":\s*{EPOCH}
 
-# IP идет сразу после "remote_ip":" или "client_ip":"
-# Кавычки ограничивают захват только IP адреса
-failregex = "remote_ip":"<HOST>".*"status":(401|403)
-            "client_ip":"<HOST>".*"status":(401|403)
-            
+# IP идет внутри request объекта, status — на верхнем уровне JSON
+# Порядок в строке: remote_ip -> ... -> status
+failregex = "remote_ip":"<HOST>".*"status":\s*(401|403|429)
+            "client_ip":"<HOST>".*"status":\s*(401|403|429)
+
 # Common Log Format (CLF) fallback
-            ^<HOST> - .* "(GET|POST|HEAD|PUT|DELETE).*" (401|403) .*$
+            ^<HOST> - .* "(GET|POST|HEAD|PUT|DELETE).*" (401|403|429) .*$
 
 ignoreregex =
 
