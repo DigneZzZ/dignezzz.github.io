@@ -669,17 +669,21 @@ print_table() {
 
   unused_ports=()
 
-  # Собираем оригинальные порты из ufw status
-  declare -A original_ports
-  while read -r line; do
-    [[ "$line" =~ ^Status:|^To|^--$|^Default:|^New|^Logging ]] && continue
-    [[ -z "$line" || "$line" == *"(v6)"* ]] && continue
-    local port
-    port=$(echo "$line" | awk '{print $1}')
-    [[ -n "$port" && "$port" != "--" && "$port" != "Anywhere" ]] && original_ports["$port"]=1
-  done < <(ufw status 2>/dev/null)
+  # Используем уже собранные правила из port_set (работает и при выключенном UFW)
+  # Фильтруем дублирующие /tcp и /udp записи если есть общее правило без протокола
+  declare -A display_ports
+  local k
+  for k in "${!port_set[@]}"; do
+    [[ -z "$k" || "$k" == "--" ]] && continue
+    # Если есть правило без протокола (напр. "80"), пропускаем авто-дубли "80/tcp" и "80/udp"
+    if [[ "$k" =~ ^([0-9:]+)/(tcp|udp)$ ]]; then
+      local base="${BASH_REMATCH[1]}"
+      [[ -n "${port_set[$base]:-}" ]] && continue
+    fi
+    display_ports["$k"]=1
+  done
 
-  mapfile -t entries < <(printf "%s\n" "${!original_ports[@]}" | sort -V)
+  mapfile -t entries < <(printf "%s\n" "${!display_ports[@]}" | sort -V)
 
   local e
   for e in "${entries[@]}"; do
@@ -854,15 +858,26 @@ _report_delete() {
 # ═════════════════════════════════════════════════════════════════════════════
 
 cleanup() {
+  # Проверяем есть ли вообще что-то делать
+  local has_work=false
+  (( ${#missing_ports[@]} )) && has_work=true
+  (( ${#unused_ports[@]} )) && has_work=true
+
   if ! $initial_active; then
     msg ""
-    msg_warn "UFW выключен."
-    read -r -p "  Включить для удаления? (y/n): " ans
-    if [[ $ans =~ ^[Yy]$ ]]; then
-      $DRY_RUN || { ufw --force enable && log "ENABLE"; }
+    if [[ "$has_work" == true ]]; then
+      msg_warn "UFW выключен."
+      read -r -p "  Включить UFW для применения изменений? (y/n): " ans
+      if [[ $ans =~ ^[Yy]$ ]]; then
+        $DRY_RUN || { ufw --force enable && log "ENABLE"; }
+      else
+        msg_warn "Включите UFW и перезапустите."
+        exit 0
+      fi
     else
-      msg_warn "Включите UFW и перезапустите."
-      exit 0
+      msg_info "UFW выключен. Нет правил для изменения."
+      msg_warn "Рекомендуется включить UFW: ${WHITE}ufw --force enable${NC}"
+      return 0
     fi
   fi
 
