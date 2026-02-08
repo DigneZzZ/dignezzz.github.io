@@ -6,7 +6,7 @@ set -euo pipefail
 # ║  Поддерживает: Docker, Podman, systemd, --dry-run, логирование, конфиг   ║
 # ╚═══════════════════════════════════════════════════════════════════════════╝
 
-readonly VERSION="3.0"
+readonly VERSION="3.1"
 
 # ─── Конфигурация (переопределяется из /etc/ufw-cleaner.conf) ─────────────
 
@@ -38,12 +38,13 @@ if [[ -t 1 ]]; then
   ICON_LOCK="🔒"
   ICON_DOCKER="🐳"
   ICON_GEAR="⚙"
+  ICON_WG="🔐"
 else
   GREEN="" RED="" YELLOW="" BLUE="" CYAN="" GRAY="" WHITE=""
   BOLD="" DIM="" NC=""
   ICON_OK="[OK]" ICON_FAIL="[X]" ICON_WARN="[!]" ICON_ARROW=">"
   ICON_BULLET="*" ICON_SHIELD="" ICON_LOCK=""
-  ICON_DOCKER="" ICON_GEAR=""
+  ICON_DOCKER="" ICON_GEAR="" ICON_WG=""
 fi
 
 # ─── Внутренние сервисы (не предлагаются к открытию) ─────────────────────
@@ -557,10 +558,93 @@ check_used() {
     fi
   done < <(ss -tulnpH | awk '{print tolower($1), $5, $7}')
 
+  # WireGuard / AmneziaWG (kernel-module, ss не показывает процесс)
+  detect_wireguard
+
   # systemd-сервисы (опционально)
   [[ "$CHECK_SYSTEMD" == "true" ]] && check_systemd_services
 
   msg_ok "Проверено портов: ${WHITE}${#used_map[@]}${NC}"
+}
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  WireGuard / AmneziaWG (работает как модуль ядра — ss не видит процесс)
+# ═════════════════════════════════════════════════════════════════════════════
+
+detect_wireguard() {
+  # Проверяем наличие wireguard-интерфейсов
+  local wg_ifaces
+  mapfile -t wg_ifaces < <(ip link show type wireguard 2>/dev/null | grep -oP '^\d+:\s+\K[^:@]+' || true)
+  (( ${#wg_ifaces[@]} == 0 )) && return 0
+
+  local iface
+  for iface in "${wg_ifaces[@]}"; do
+    [[ -z "$iface" ]] && continue
+    local listen_port="" wg_type="WireGuard"
+
+    # Пробуем wg (стандартный WireGuard)
+    if command -v wg &>/dev/null; then
+      listen_port=$(wg show "$iface" listen-port 2>/dev/null || true)
+    fi
+
+    # Пробуем awg (AmneziaWG)
+    if [[ -z "$listen_port" ]] && command -v awg &>/dev/null; then
+      listen_port=$(awg show "$iface" listen-port 2>/dev/null || true)
+      [[ -n "$listen_port" ]] && wg_type="AmneziaWG"
+    fi
+
+    # Фоллбек: ищем порт через ss (порт есть, но без процесса)
+    if [[ -z "$listen_port" ]]; then
+      # Ищем UDP-порты без процесса, которые принадлежат wireguard
+      # Проверяем стандартный порт 51820 или любой из /etc/wireguard/*.conf
+      local conf_port=""
+      local conf_file
+      for conf_file in /etc/wireguard/"${iface}".conf /etc/amnezia/amneziawg/"${iface}".conf; do
+        if [[ -f "$conf_file" ]]; then
+          conf_port=$(grep -i "^ListenPort" "$conf_file" 2>/dev/null | awk -F= '{print $2}' | tr -d ' ')
+          [[ -n "$conf_port" ]] && break
+        fi
+      done
+
+      if [[ -n "$conf_port" ]]; then
+        listen_port="$conf_port"
+      else
+        # Последний фоллбек: UDP-порты без процесса в ss
+        while read -r addr; do
+          local p
+          if [[ "$addr" =~ :([0-9]+)$ ]]; then
+            p="${BASH_REMATCH[1]}"
+            local key="$p/udp"
+            # Порт в ss, но без сервиса → вероятно wireguard
+            if [[ -n "${used_map[$key]:-}" && -z "${service_map[$key]:-}" ]]; then
+              listen_port="$p"
+              break
+            fi
+          fi
+        done < <(ss -ulnpH | awk '$7 == "" {print $5}')
+      fi
+
+      # Определяем тип: wg или awg
+      if command -v awg &>/dev/null && ! command -v wg &>/dev/null; then
+        wg_type="AmneziaWG"
+      elif lsmod 2>/dev/null | grep -q "amneziawg"; then
+        wg_type="AmneziaWG"
+      fi
+    fi
+
+    [[ -z "$listen_port" ]] && continue
+
+    local key="${listen_port}/udp"
+    used_map["$key"]=1
+    used_map["$listen_port"]=1
+    service_map["$key"]="${wg_type}: ${iface}"
+    service_map["$listen_port"]="${wg_type}: ${iface}"
+
+    # Порт не открыт в UFW?
+    if [[ -z "${port_set[$key]:-}" && -z "${port_set[$listen_port]:-}" ]]; then
+      is_internal "$key" || missing_ports+=("$key")
+    fi
+  done
 }
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -733,6 +817,8 @@ print_table() {
     # Иконки для типа сервиса
     if [[ "$svc" == *"docker:"* || "$svc" == *"podman:"* ]]; then
       svc="${ICON_DOCKER} ${svc}"
+    elif [[ "$svc" == *"WireGuard:"* || "$svc" == *"AmneziaWG:"* ]]; then
+      svc="${ICON_WG} ${svc}"
     elif [[ "$svc" == *"сервис:"* ]]; then
       svc="${ICON_GEAR} ${svc}"
     fi
@@ -762,6 +848,8 @@ print_table() {
       local svc="${service_map["$mp"]:-"-"}"
       if [[ "$svc" == *"docker:"* || "$svc" == *"podman:"* ]]; then
         svc="${ICON_DOCKER} ${svc}"
+      elif [[ "$svc" == *"WireGuard:"* || "$svc" == *"AmneziaWG:"* ]]; then
+        svc="${ICON_WG} ${svc}"
       elif [[ "$svc" == *"сервис:"* ]]; then
         svc="${ICON_GEAR} ${svc}"
       fi
