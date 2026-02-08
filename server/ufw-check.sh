@@ -539,8 +539,6 @@ collect_docker_ports() {
           missing_ports+=("$key")
         fi
       fi
-        fi
-      fi
     done
   done
 }
