@@ -1,0 +1,41 @@
+# MTProxy Docker Compose Example
+# This file shows the configuration used by the mtproxy.sh script
+# Do NOT use this file directly - use the mtproxy.sh script instead
+
+version: '3.8'
+
+services:
+  mtproto-proxy:
+    image: telegrammessenger/proxy:latest
+    container_name: mtproto-proxy
+    restart: always
+    
+    # Port mapping: host_port:container_port
+    # Change the first number to use a different port on your server
+    # Examples:
+    #   - "443:443"   # Default HTTPS port
+    #   - "8443:443"  # Alternative port if 443 is busy
+    #   - "9443:443"  # Another alternative
+    ports:
+      - "443:443"
+    
+    # Environment variables
+    # SECRET: Generated automatically during installation
+    # TAG: Optional, get from @MTProxybot for channel branding
+    environment:
+      SECRET: "your-secret-here"
+      TAG: "your-tag-from-mtproxybot"  # Optional, leave empty if not using
+    
+    # Persistent volume for proxy data
+    volumes:
+      - proxy-config:/data
+    
+    # Logging configuration
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  proxy-config:
