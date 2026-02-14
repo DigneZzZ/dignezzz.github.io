@@ -15,7 +15,6 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 CYAN='\033[0;36m'
-BOLD='\033[1m'
 NC='\033[0m'
 
 echo -e "${BLUE}MTProxy Docker Installation${NC}\n"
@@ -77,7 +76,7 @@ update_tag() {
     
     # Restart container to apply changes
     echo -e "${YELLOW}Restarting MTProxy container...${NC}"
-    cd "$INSTALL_DIR"
+    cd "$INSTALL_DIR" || exit 1
     docker-compose down
     docker-compose up -d
     
@@ -109,7 +108,7 @@ if [[ "$1" == "uninstall" ]]; then
     # Stop and remove Docker containers
     if [[ -f "$COMPOSE_FILE" ]]; then
         echo -e "${YELLOW}Stopping Docker containers...${NC}"
-        cd "$INSTALL_DIR"
+        cd "$INSTALL_DIR" || exit 1
         docker-compose down -v 2>/dev/null || true
     fi
     
@@ -274,7 +273,7 @@ read -p "Enter TAG from @MTProxybot (leave empty to skip): " USER_TAG
 
 # Create installation directory
 mkdir -p "$INSTALL_DIR"
-cd "$INSTALL_DIR"
+cd "$INSTALL_DIR" || exit 1
 
 # Stop existing container if running
 docker-compose down 2>/dev/null || true
