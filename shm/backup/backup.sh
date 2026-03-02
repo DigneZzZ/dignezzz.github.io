@@ -17,8 +17,8 @@ detect_os() {
         OS_NAME=$PRETTY_NAME
     elif [ -f /etc/redhat-release ]; then
         OS="rhel"
-        OS_VERSION=$(cat /etc/redhat-release | grep -oE '[0-9]+\.[0-9]+' | head -1)
-        OS_NAME=$(cat /etc/redhat-release)
+        OS_VERSION=$(grep -oE '[0-9]+\.[0-9]+' /etc/redhat-release | head -1)
+        OS_NAME=$(< /etc/redhat-release)
     else
         OS="unknown"
         OS_VERSION="unknown"
@@ -86,7 +86,7 @@ check_dependencies() {
     local missing_deps=()
     
     # Required commands
-    local required_cmds=("docker" "curl" "tar" "grep" "sed")
+    local required_cmds=("docker" "curl" "tar" "grep" "sed" "split")
     
     for cmd in "${required_cmds[@]}"; do
         if ! command -v "$cmd" &> /dev/null; then
@@ -166,15 +166,15 @@ print_error() {
 }
 
 print_warning() {
-    echo -e "${YELLOW}⚠ $1${NC}"
+    echo -e "${YELLOW}⚠ $1${NC}" >&2
 }
 
 print_success() {
-    echo -e "${GREEN}✔ $1${NC}"
+    echo -e "${GREEN}✔ $1${NC}" >&2
 }
 
 print_info() {
-    echo -e "${BLUE}$1${NC}"
+    echo -e "${BLUE}$1${NC}" >&2
 }
 
 # Prompt for user input with default value
@@ -185,7 +185,7 @@ prompt_input() {
     local input
     echo -ne "${prompt} [${default}]: " >&2
     read -r input
-    eval "$var_name=\"${input:-$default}\""
+    printf -v "$var_name" '%s' "${input:-$default}"
 }
 
 # Check system compatibility and dependencies
@@ -202,7 +202,7 @@ get_compose_path() {
     echo -e "${BLUE}  1) /root/shm${NC}" >&2
     echo -e "${BLUE}  2) /opt/shm${NC}" >&2
     echo -e "${BLUE}  3) Enter manually${NC}" >&2
-    print_info "Note: Info from .env and other files will be read from this path." >&2
+    print_info "Note: Info from .env and other files will be read from this path."
     
     local choice
     echo -ne "Choose an option (1-3) [2]: " >&2
@@ -248,11 +248,16 @@ get_backup_mode() {
     esac
 }
 
-# Read environment variable from file
+# Read environment variable from file (strips surrounding quotes)
 read_env_var() {
     local var_name="$1"
     local file="$2"
-    grep "^$var_name=" "$file" 2>/dev/null | cut -d '=' -f 2-
+    local value
+    value=$(grep "^$var_name=" "$file" 2>/dev/null | cut -d '=' -f 2-)
+    # Strip surrounding quotes (single or double)
+    value="${value#\"}"; value="${value%\"}"
+    value="${value#\'}"; value="${value%\'}"
+    echo "$value"
 }
 
 # Get database configuration
@@ -261,7 +266,7 @@ get_db_config() {
     local env_file="$compose_path/.env"
     
     if [ -f "$env_file" ]; then
-        print_success ".env file found at $compose_path. Using it for DB connection." >&2
+        print_success ".env file found at $compose_path. Using it for DB connection."
         echo "USE_ENV=true"
         
         MYSQL_USER=$(read_env_var "MYSQL_USER" "$env_file")
@@ -272,15 +277,15 @@ get_db_config() {
         MYSQL_DATABASE=${MYSQL_DATABASE:-shm}
         
         if [ -z "$MYSQL_PASS" ]; then
-            print_warning "MYSQL_PASS not found in .env file. Will use environment variables at runtime." >&2
+            print_warning "MYSQL_PASS not found in .env file. Will use environment variables at runtime."
         fi
         
         echo "MYSQL_USER=$MYSQL_USER"
         echo "MYSQL_PASS=$MYSQL_PASS"
         echo "MYSQL_DATABASE=$MYSQL_DATABASE"
     else
-        print_warning ".env file not found at $compose_path." >&2
-        print_info "You'll need to enter DB connection details manually." >&2
+        print_warning ".env file not found at $compose_path."
+        print_info "You'll need to enter DB connection details manually."
         echo "USE_ENV=false"
         
         prompt_input "${YELLOW}Enter MYSQL_USER${NC}" MYSQL_USER "root"
@@ -299,8 +304,8 @@ get_db_container() {
     container=$(docker ps --filter "name=mysql" --format "{{.Names}}" 2>/dev/null | head -1)
     
     if [ -z "$container" ]; then
-        print_warning "Database container 'mysql' not found!" >&2
-        print_info "Please enter the correct container name for the database:" >&2
+        print_warning "Database container 'mysql' not found!"
+        print_info "Please enter the correct container name for the database:"
         prompt_input "${YELLOW}Enter DB container name${NC}" container "mysql"
     fi
     
@@ -346,11 +351,30 @@ generate_script_header() {
 #!/bin/bash
 set -euo pipefail
 
+# Lock file to prevent concurrent runs
+LOCK_FILE="/tmp/shm_backup.lock"
+if [ -f "$LOCK_FILE" ]; then
+    LOCK_PID=$(cat "$LOCK_FILE" 2>/dev/null)
+    if kill -0 "$LOCK_PID" 2>/dev/null; then
+        echo "Error: Backup already running (PID $LOCK_PID)" >&2
+        exit 1
+    fi
+    rm -f "$LOCK_FILE"
+fi
+echo $$ > "$LOCK_FILE"
+
 # Error handler
 error_exit() {
     echo "Error: $1" >&2
     exit 1
 }
+
+# Cleanup on exit (success or failure)
+cleanup() {
+    rm -rf "$BACKUP_DIR" "${TEMP_ARCHIVE_DIR:-}" 2>/dev/null || true
+    rm -f "$ARCHIVE_NAME" /tmp/shm_tg_response.json "$LOCK_FILE" 2>/dev/null || true
+}
+trap cleanup EXIT
 
 # Track backup start time
 BACKUP_START=$(date +%s)
@@ -368,6 +392,7 @@ BACKUP_DATE="\$(date '+%Y-%m-%d %H:%M:%S UTC')"
 ARCHIVE_NAME="\$BACKUP_DIR.tar.gz"
 MAX_SIZE_MB=49
 DB_CONTAINER="$DB_CONTAINER"
+TEMP_ARCHIVE_DIR=""
 EOF
 }
 
@@ -408,6 +433,7 @@ mkdir -p "$BACKUP_DIR"
 echo "Creating MySQL backup..."
 docker exec "$DB_CONTAINER" mysqldump \
     --no-tablespaces \
+    --single-transaction \
     -u "$MYSQL_USER" \
     -p"$MYSQL_PASS" \
     "$MYSQL_DATABASE" > "$BACKUP_DIR/db_backup.sql" \
@@ -419,7 +445,7 @@ backup_webdav_volume() {
     local volume=""
     
     if [ ! -f "docker-compose.yml" ]; then
-        echo "Warning: docker-compose.yml not found, skipping volume backup"
+        echo "Warning: docker-compose.yml not found, skipping volume backup" >&2
         return 0
     fi
     
@@ -436,25 +462,25 @@ backup_webdav_volume() {
     fi
     
     if [ -z "$volume" ]; then
-        echo "WebDAV volume not detected in docker-compose.yml"
+        echo "WebDAV volume not detected in docker-compose.yml" >&2
         return 0
     fi
     
-    echo "Detected WebDAV volume: $volume"
+    echo "Detected WebDAV volume: $volume" >&2
     
     if ! docker volume inspect "$volume" >/dev/null 2>&1; then
-        echo "Warning: Volume $volume not found, skipping"
+        echo "Warning: Volume $volume not found, skipping" >&2
         return 0
     fi
     
-    echo "Backing up volume $volume..."
+    echo "Backing up volume $volume..." >&2
     docker run --rm \
         -v "$volume:/volume" \
         -v "$BACKUP_DIR:/backup" \
         alpine tar czf /backup/webdav-volume.tar.gz -C /volume . \
-        || { echo "Warning: Failed to backup volume $volume"; return 1; }
+        || { echo "Warning: Failed to backup volume $volume" >&2; return 1; }
     
-    echo "✔ Volume $volume backed up successfully"
+    echo "✔ Volume $volume backed up successfully" >&2
     echo "$volume"
 }
 
@@ -569,13 +595,21 @@ send_telegram() {
         -F "document=@$file"
         -F "caption=$caption"
         -F "parse_mode=HTML"
-        -o "telegram_response.json"
+        -o "/tmp/shm_tg_response.json"
         -s
+        -w "%{http_code}"
     )
     
     [ -n "$TELEGRAM_TOPIC_ID" ] && curl_args+=(-F "message_thread_id=$TELEGRAM_TOPIC_ID")
     
-    curl "${curl_args[@]}" "$url"
+    local http_code
+    http_code=$(curl "${curl_args[@]}" "$url") || error_exit "curl request failed (network error)"
+    
+    if [ "$http_code" != "200" ] || grep -q '"ok":false' /tmp/shm_tg_response.json 2>/dev/null; then
+        echo "Telegram API error (HTTP $http_code):" >&2
+        cat /tmp/shm_tg_response.json >&2
+        return 1
+    fi
 }
 
 # Check if splitting is needed
@@ -594,32 +628,19 @@ if [ "$ARCHIVE_SIZE" -gt "$MAX_SIZE_MB" ]; then
         MESSAGE=$(build_message "📦 <b>Part:</b> <code>$PART_NUM of $PART_COUNT</code> (<code>${PART_SIZE}</code>)")
         
         echo "Sending part $PART_NUM of $PART_COUNT..."
-        send_telegram "$PART_FILE" "$MESSAGE"
-        
-        if grep -q '"ok":false' telegram_response.json 2>/dev/null; then
-            echo "Error sending part $PART_NUM:" >&2
-            cat telegram_response.json >&2
-            exit 1
-        fi
+        send_telegram "$PART_FILE" "$MESSAGE" \
+            || error_exit "Failed to send part $PART_NUM"
         echo "✔ Part $PART_NUM of $PART_COUNT sent successfully"
     done
 else
     MESSAGE=$(build_message "")
     
     echo "Sending archive to Telegram..."
-    send_telegram "$ARCHIVE_NAME" "$MESSAGE"
-    
-    if grep -q '"ok":false' telegram_response.json 2>/dev/null; then
-        echo "Telegram returned an error:" >&2
-        cat telegram_response.json >&2
-        exit 1
-    fi
+    send_telegram "$ARCHIVE_NAME" "$MESSAGE" \
+        || error_exit "Failed to send archive to Telegram"
     echo "✔ Archive successfully sent to Telegram"
 fi
 
-# Cleanup
-rm -rf "$BACKUP_DIR"
-rm -f "$ARCHIVE_NAME" telegram_response.json
 echo "✔ Backup completed successfully in $BACKUP_TIME_HR"
 EOF
 }
@@ -723,9 +744,7 @@ setup_crontab() {
     fi
     
     # Add new cron job
-    (crontab -l 2>/dev/null || true; echo "$cron_schedule $BACKUP_SCRIPT # SHM Backup") | crontab -
-    
-    if [ $? -eq 0 ]; then
+    if (crontab -l 2>/dev/null || true; echo "$cron_schedule $BACKUP_SCRIPT # SHM Backup") | crontab - 2>/dev/null; then
         echo
         print_success "Cron job added successfully!"
         echo -e "${BLUE}📅 Schedule:${NC} ${GREEN}$description${NC}"
