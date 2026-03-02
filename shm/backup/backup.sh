@@ -183,7 +183,7 @@ prompt_input() {
     local var_name="$2"
     local default="$3"
     local input
-    echo -ne "${prompt} [${default}]: "
+    echo -ne "${prompt} [${default}]: " >&2
     read -r input
     eval "$var_name=\"${input:-$default}\""
 }
@@ -198,14 +198,14 @@ print_info "This script will create a ${YELLOW}backup.sh${NC} file with your set
 
 # Get SHM installation path
 get_compose_path() {
-    echo -e "${YELLOW}📍 Specify the path to docker-compose.yml for SHM:${NC}"
-    echo -e "${BLUE}  1) /root/shm${NC}"
-    echo -e "${BLUE}  2) /opt/shm${NC}"
-    echo -e "${BLUE}  3) Enter manually${NC}"
-    print_info "Note: Info from .env and other files will be read from this path."
+    echo -e "${YELLOW}📍 Specify the path to docker-compose.yml for SHM:${NC}" >&2
+    echo -e "${BLUE}  1) /root/shm${NC}" >&2
+    echo -e "${BLUE}  2) /opt/shm${NC}" >&2
+    echo -e "${BLUE}  3) Enter manually${NC}" >&2
+    print_info "Note: Info from .env and other files will be read from this path." >&2
     
     local choice
-    echo -ne "Choose an option (1-3) [2]: "
+    echo -ne "Choose an option (1-3) [2]: " >&2
     read -r choice
     choice=${choice:-2}
 
@@ -232,12 +232,12 @@ validate_compose_path() {
 
 # Get backup mode preference
 get_backup_mode() {
-    echo -e "${YELLOW}📁 Do you want to backup the entire folder ($1)?${NC}"
-    echo -e "${BLUE}  1) Yes, backup all files and subfolders${NC}"
-    echo -e "${BLUE}  2) No, backup only specific files (docker-compose.yml, .env)${NC}"
+    echo -e "${YELLOW}📁 Do you want to backup the entire folder ($1)?${NC}" >&2
+    echo -e "${BLUE}  1) Yes, backup all files and subfolders${NC}" >&2
+    echo -e "${BLUE}  2) No, backup only specific files (docker-compose.yml, .env)${NC}" >&2
     
     local choice
-    echo -ne "Choose an option (1-2) [1]: "
+    echo -ne "Choose an option (1-2) [1]: " >&2
     read -r choice
     choice=${choice:-1}
 
@@ -261,7 +261,7 @@ get_db_config() {
     local env_file="$compose_path/.env"
     
     if [ -f "$env_file" ]; then
-        print_success ".env file found at $compose_path. Using it for DB connection."
+        print_success ".env file found at $compose_path. Using it for DB connection." >&2
         echo "USE_ENV=true"
         
         MYSQL_USER=$(read_env_var "MYSQL_USER" "$env_file")
@@ -272,15 +272,15 @@ get_db_config() {
         MYSQL_DATABASE=${MYSQL_DATABASE:-shm}
         
         if [ -z "$MYSQL_PASS" ]; then
-            print_warning "MYSQL_PASS not found in .env file. Will use environment variables at runtime."
+            print_warning "MYSQL_PASS not found in .env file. Will use environment variables at runtime." >&2
         fi
         
         echo "MYSQL_USER=$MYSQL_USER"
         echo "MYSQL_PASS=$MYSQL_PASS"
         echo "MYSQL_DATABASE=$MYSQL_DATABASE"
     else
-        print_warning ".env file not found at $compose_path."
-        print_info "You'll need to enter DB connection details manually."
+        print_warning ".env file not found at $compose_path." >&2
+        print_info "You'll need to enter DB connection details manually." >&2
         echo "USE_ENV=false"
         
         prompt_input "${YELLOW}Enter MYSQL_USER${NC}" MYSQL_USER "root"
@@ -299,8 +299,8 @@ get_db_container() {
     container=$(docker ps --filter "name=mysql" --format "{{.Names}}" 2>/dev/null | head -1)
     
     if [ -z "$container" ]; then
-        print_warning "Database container 'mysql' not found!"
-        print_info "Please enter the correct container name for the database:"
+        print_warning "Database container 'mysql' not found!" >&2
+        print_info "Please enter the correct container name for the database:" >&2
         prompt_input "${YELLOW}Enter DB container name${NC}" container "mysql"
     fi
     
@@ -309,14 +309,14 @@ get_db_container() {
 
 # Get Telegram configuration
 get_telegram_config() {
-    echo -e "${YELLOW}📡 Telegram Settings:${NC}"
+    echo -e "${YELLOW}📡 Telegram Settings:${NC}" >&2
     
     prompt_input "${BLUE}Enter Telegram Bot Token (from @BotFather)${NC}" TELEGRAM_BOT_TOKEN ""
     prompt_input "${BLUE}Enter Telegram Chat/Channel ID (e.g., -1001234567890)${NC}" TELEGRAM_CHAT_ID ""
     prompt_input "${BLUE}Enter Telegram Topic ID (optional, press Enter to skip)${NC}" TELEGRAM_TOPIC_ID ""
     
     if [ -z "$TELEGRAM_BOT_TOKEN" ] || [ -z "$TELEGRAM_CHAT_ID" ]; then
-        print_error "Telegram Bot Token and Chat ID are required!"
+        print_error "Telegram Bot Token and Chat ID are required!" >&2
         exit 1
     fi
     
