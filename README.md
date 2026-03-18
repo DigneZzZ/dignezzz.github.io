@@ -16,7 +16,7 @@
 | ufw_main.sh | `bash <(wget -qO- https://dignezzz.github.io/marzban/ufw_main.sh)` |
 | ufw_node.sh | `bash <(wget -qO- https://dignezzz.github.io/marzban/ufw_node.sh)` |
 
-_Last updated at 2026-03-18 15:49 MSK_
+_Last updated at 2026-03-18 16:50 MSK_
 
 ## server
 
@@ -33,6 +33,7 @@ _Last updated at 2026-03-18 15:49 MSK_
 | init.sh | `bash <(wget -qO- https://dignezzz.github.io/server/init.sh)` |
 | mtproxy.sh | `bash <(wget -qO- https://dignezzz.github.io/server/mtproxy.sh)` |
 | mtu.sh | `bash <(wget -qO- https://dignezzz.github.io/server/mtu.sh)` |
+| netbird-egress.sh | `bash <(wget -qO- https://dignezzz.github.io/server/netbird-egress.sh)` |
 | reality.sh | `bash <(wget -qO- https://dignezzz.github.io/server/reality.sh)` |
 | safe-cleanup.sh | `bash <(wget -qO- https://dignezzz.github.io/server/safe-cleanup.sh)` |
 | security.sh | `bash <(wget -qO- https://dignezzz.github.io/server/security.sh)` |
@@ -47,7 +48,7 @@ _Last updated at 2026-03-18 15:49 MSK_
 | ufw-copy.sh | `bash <(wget -qO- https://dignezzz.github.io/server/ufw-copy.sh)` |
 | unlimit_server.sh | `bash <(wget -qO- https://dignezzz.github.io/server/unlimit_server.sh)` |
 
-_Last updated at 2026-03-18 15:49 MSK_
+_Last updated at 2026-03-18 16:50 MSK_
 
 ## shm
 
@@ -57,7 +58,7 @@ _Last updated at 2026-03-18 15:49 MSK_
 |-------------|---------|
 | backup.sh | `bash <(wget -qO- https://dignezzz.github.io/shm/backup/backup.sh)` |
 
-_Last updated at 2026-03-18 15:49 MSK_
+_Last updated at 2026-03-18 16:50 MSK_
 
 ---
 ## 📘 Additional Resources
@@ -67,4 +68,4 @@ _Last updated at 2026-03-18 15:49 MSK_
 
 - ✍️ [neonode.cc](https://neonode.cc) — блог с техническими заметками, статьями и руководствами.
 
-_Global README auto-generated at 2026-03-18 15:49 MSK_
+_Global README auto-generated at 2026-03-18 16:50 MSK_
