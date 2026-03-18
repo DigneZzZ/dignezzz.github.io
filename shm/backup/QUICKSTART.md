@@ -1,4 +1,4 @@
-# ⚡ Quick Start - SHM Backup v2.1
+# ⚡ Quick Start - SHM Backup v2.2
 
 ## Установка одной командой
 

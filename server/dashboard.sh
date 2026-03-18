@@ -14,7 +14,7 @@ set -euo pipefail  # Exit on error, undefined variable, pipe failure
 # ============================================================================
 # CONSTANTS
 # ============================================================================
-readonly SCRIPT_VERSION="2025.12.18.3"
+readonly SCRIPT_VERSION="2026.03.18.1"
 readonly SCRIPT_NAME="GIG MOTD Dashboard"
 readonly REMOTE_URL="https://dignezzz.github.io/server/dashboard.sh"
 
@@ -204,16 +204,18 @@ $(_bold "FEATURES:")
     ✅ Inodes monitoring: alerts when > 80%
     ✅ CPU temperature monitoring (if available)
     ✅ Auto-update checking (on every login)
+    ✅ NetBird VPN: status, IP, peers, features (DNS, Rosenpass, Routes)
     ✅ Fully configurable via /etc/motdrc or ~/.motdrc
     ✅ Optimized for fast loading
 
-$(_bold "CONFIGURABLE SECTIONS (25 total):")
+$(_bold "CONFIGURABLE SECTIONS (26 total):")
     SHOW_UPTIME, SHOW_LOAD, SHOW_CPU, SHOW_RAM, SHOW_SWAP, SHOW_DISK
     SHOW_ADDITIONAL_DISKS, SHOW_INODES, SHOW_PROCESSES
     SHOW_IO_WAIT, SHOW_NET, SHOW_IP, SHOW_CONNECTIONS
     SHOW_LAST_LOGIN, SHOW_FAILED_LOGINS, SHOW_DOCKER
     SHOW_DOCKER_VOLUMES, SHOW_SERVICES, SHOW_SSL_CERTS, SHOW_SSH
     SHOW_SECURITY, SHOW_UPDATES, SHOW_AUTOUPDATES, SHOW_FAIL2BAN_STATS, SHOW_TEMP
+    SHOW_NETBIRD
 
 $(_bold "VERSION FORMAT:")
     YYYY.MM.DD.MINOR - Example: 2025.10.05.2
@@ -364,6 +366,7 @@ OPTIONS=(
   SHOW_AUTOUPDATES
   SHOW_FAIL2BAN_STATS
   SHOW_TEMP
+  SHOW_NETBIRD
 )
 
 # Descriptions for each option
@@ -373,6 +376,7 @@ declare -A DEPENDENCIES=(
   ["SHOW_DOCKER"]="docker"
   ["SHOW_DOCKER_VOLUMES"]="docker"
   ["SHOW_FAIL2BAN_STATS"]="fail2ban-client"
+  ["SHOW_NETBIRD"]="netbird"
 )
 
 # Пакеты для установки
@@ -408,6 +412,7 @@ declare -A DESCRIPTIONS=(
   ["SHOW_AUTOUPDATES"]="Auto-updates status"
   ["SHOW_FAIL2BAN_STATS"]="Fail2ban banned IPs count (требует fail2ban)"
   ["SHOW_TEMP"]="CPU temperature (if available)"
+  ["SHOW_NETBIRD"]="NetBird VPN status, IP and peers (требует netbird)"
 )
 
 # Функция проверки зависимости
@@ -644,6 +649,7 @@ migrate_motd_config() {
         ["SSL_WARN_DAYS"]="30"
         ["MONITORED_SERVICES"]="nginx,mysql,postgresql,redis,docker,fail2ban"
         ["SSL_CERT_PATHS"]="/etc/letsencrypt/live"
+        ["SHOW_NETBIRD"]="true"
     )
     
     local updated=false
@@ -710,6 +716,9 @@ SHOW_DOCKER=true
 SHOW_DOCKER_VOLUMES=true
 SHOW_SERVICES=true
 SHOW_SSL_CERTS=true
+
+# === VPN ===
+SHOW_NETBIRD=true
 
 # === Updates ===
 SHOW_UPDATES=true
@@ -817,6 +826,28 @@ install_dependencies() {
             echo "    Для установки выполни: sudo apt install vnstat -y"
         fi
     fi
+
+    # Проверяем last (нужен для Last Login, перенесён в util-linux-extra на Ubuntu 24.04+)
+    if ! command -v last &>/dev/null; then
+        if [ "$EUID" -eq 0 ]; then
+            info "Устанавливаю util-linux-extra для команды last..."
+            case "$PACKAGE_MANAGER" in
+                apt)
+                    apt-get install -y util-linux-extra >/dev/null 2>&1 || apt-get install -y util-linux >/dev/null 2>&1
+                    ;;
+                dnf|yum)
+                    $PACKAGE_MANAGER install -y util-linux >/dev/null 2>&1
+                    ;;
+            esac
+            if command -v last &>/dev/null; then
+                success "last установлен (util-linux-extra)"
+            else
+                warning "Не удалось установить last. Last Login будет использовать fallback."
+            fi
+        else
+            warning "Команда last не найдена. Last Login может быть неполным."
+        fi
+    fi
 }
 
 if [ "$EUID" -ne 0 ]; then
@@ -846,7 +877,7 @@ fi
 cat > "$TMP_FILE" << 'EOF'
 #!/bin/bash
 
-CURRENT_VERSION="2025.12.18.3"
+CURRENT_VERSION="2025.03.18.1"
 REMOTE_URL="https://dignezzz.github.io/server/dashboard.sh"
 CONFIG_GLOBAL="/etc/motdrc"
 
@@ -929,6 +960,7 @@ CONFIG_USER="$HOME/.motdrc"
 : "${SHOW_IO_WAIT:=true}"
 : "${SHOW_FAILED_LOGINS:=true}"
 : "${SHOW_DOCKER_VOLUMES:=true}"
+: "${SHOW_NETBIRD:=true}"
 
 # Настройка сервисов для мониторинга (через запятую)
 : "${MONITORED_SERVICES:=nginx,mysql,postgresql,redis,docker,fail2ban}"
@@ -1161,11 +1193,14 @@ fi
 
 # Последний логин (только если включено)
 if [ "$SHOW_LAST_LOGIN" = true ]; then
-    if [ -f /var/log/wtmp ]; then
-        last_login=$(last -n 1 -w | head -n 1 | awk '{printf "%s from %s at %s %s %s", $1, $3, $5, $6, $7}')
+    if command -v last &>/dev/null && [ -f /var/log/wtmp ]; then
+        last_login=$(last -n 1 -w 2>/dev/null | head -n 1 | awk '{printf "%s from %s at %s %s %s", $1, $3, $5, $6, $7}')
+    elif command -v lastlog &>/dev/null; then
+        last_login=$(lastlog -u "$(whoami)" 2>/dev/null | tail -1 | awk '{printf "%s %s %s from %s", $4, $5, $6, $3}')
     else
-        last_login="n/a"
+        last_login="n/a (install util-linux-extra)"
     fi
+    [ -z "$last_login" ] && last_login="n/a"
 fi
 
 # Неудачные попытки входа за 24ч (только если включено)
@@ -1336,6 +1371,64 @@ if [ "$SHOW_DOCKER" = true ]; then
                 fi
             fi
             { echo "$docker_msg"; echo "$docker_msg_extra"; } > "$dc_cache" 2>/dev/null
+        fi
+    fi
+fi
+
+# NetBird VPN (только если включено) - с кэшированием
+if [ "$SHOW_NETBIRD" = true ]; then
+    netbird_msg="$warn not installed"
+    netbird_extra=""
+    if command -v netbird &>/dev/null; then
+        nb_cache="/tmp/motd-netbird"
+        if cache_valid "$nb_cache" 60; then
+            netbird_msg=$(head -1 "$nb_cache" 2>/dev/null)
+            netbird_extra=$(tail -n +2 "$nb_cache" 2>/dev/null)
+        else
+            nb_status_output=$(netbird status 2>/dev/null)
+            if [ -n "$nb_status_output" ]; then
+                # Management connection status
+                nb_mgmt=$(echo "$nb_status_output" | grep -i 'Management:' | awk '{print $NF}')
+                # Signal connection status
+                nb_signal=$(echo "$nb_status_output" | grep -i 'Signal:' | awk '{print $NF}')
+                # NetBird IP
+                nb_ip=$(echo "$nb_status_output" | grep -i 'NetBird IP:' | awk '{print $NF}')
+                # FQDN
+                nb_fqdn=$(echo "$nb_status_output" | grep -i 'FQDN:' | awk '{print $NF}')
+                # Connected peers
+                nb_peers=$(echo "$nb_status_output" | grep -i 'Peers count:' | awk '{print $NF}')
+                # Interface
+                nb_iface=$(echo "$nb_status_output" | grep -i 'Interface type:' | awk -F: '{gsub(/^[ \t]+/,"",\$2); print \$2}')
+
+                # Build status message
+                if [ "$nb_mgmt" = "Connected" ]; then
+                    netbird_msg="$ok Connected"
+                    [ -n "$nb_ip" ] && netbird_msg="$netbird_msg | IP: $nb_ip"
+                else
+                    netbird_msg="$fail Disconnected"
+                fi
+
+                # Build extra info
+                nb_extra_lines=""
+                [ -n "$nb_fqdn" ] && [ "$nb_fqdn" != "n/a" ] && nb_extra_lines="FQDN: $nb_fqdn"
+                [ -n "$nb_peers" ] && nb_extra_lines="${nb_extra_lines:+$nb_extra_lines | }Peers: $nb_peers"
+                [ -n "$nb_iface" ] && nb_extra_lines="${nb_extra_lines:+$nb_extra_lines | }Interface: $nb_iface"
+
+                # Check enabled features
+                nb_features=""
+                echo "$nb_status_output" | grep -qi 'DNS:.*true\|DNS:.*enabled' && nb_features="DNS"
+                echo "$nb_status_output" | grep -qi 'Rosenpass:.*true\|Rosenpass:.*enabled' && nb_features="${nb_features:+$nb_features, }Rosenpass"
+                echo "$nb_status_output" | grep -qi 'Routes:' && {
+                    nb_routes=$(echo "$nb_status_output" | grep -i 'Routes:' | awk -F: '{gsub(/^[ \t]+/,"",\$2); print \$2}')
+                    [ -n "$nb_routes" ] && [ "$nb_routes" != "-" ] && nb_features="${nb_features:+$nb_features, }Routes"
+                }
+                [ -n "$nb_features" ] && nb_extra_lines="${nb_extra_lines:+$nb_extra_lines | }Features: $nb_features"
+
+                netbird_extra="$nb_extra_lines"
+            else
+                netbird_msg="$fail daemon not running"
+            fi
+            { echo "$netbird_msg"; [ -n "$netbird_extra" ] && echo "$netbird_extra"; } > "$nb_cache" 2>/dev/null
         fi
     fi
 fi
@@ -1655,6 +1748,12 @@ print_section() {
       print_row "SSH IPs" "$ssh_ips"
       echo " ~~~~~~ ↑↑↑ Security Block ↑↑↑ ~~~~~~"
       ;;
+    netbird)
+      print_row "NetBird VPN" "$netbird_msg"
+      if [ -n "$netbird_extra" ]; then
+        printf " %-20s   %s\n" "" "$netbird_extra"
+      fi
+      ;;
   esac
 }
 
@@ -1683,6 +1782,7 @@ print_section kernel
 [ "$SHOW_DOCKER_VOLUMES" = true ] && print_section docker_volumes
 [ "$SHOW_SERVICES" = true ] && print_section services
 [ "$SHOW_SSL_CERTS" = true ] && print_section ssl_certs
+[ "$SHOW_NETBIRD" = true ] && print_section netbird
 [ "$SHOW_SECURITY" = true ] && print_section ssh_block
 [ "$SHOW_UPDATES" = true ] && print_section updates
 [ "$SHOW_AUTOUPDATES" = true ] && print_section autoupdates
