@@ -52,16 +52,34 @@ jobs:
           
           for dir in */; do
             [[ "$dir" =~ ^[._] ]] && continue
-            
-            mapfile -t scripts < <(find "$dir" -maxdepth 2 -type f -name "*.sh" | sort)
+
+            mapfile -t scripts < <(find "$dir" -maxdepth 3 -type f -name "*.sh" | sort)
             [[ ${#scripts[@]} -eq 0 ]] && continue
-            
+
             {
               echo "## Scripts in ${dir%/}"
               echo ""
-              echo "| Script Name | Command |"
-              echo "|-------------|---------|"
+
+              # Group by subdirectory
+              prev_subdir=""
               for file in "${scripts[@]}"; do
+                subdir=$(dirname "$file" | sed "s|^${dir}||" | sed 's|^/||')
+                if [[ -n "$subdir" && "$subdir" != "." && "$subdir" != "${dir%/}" ]]; then
+                  if [[ "$subdir" != "$prev_subdir" ]]; then
+                    [[ -n "$prev_subdir" ]] && echo ""
+                    echo "### ${subdir}"
+                    echo ""
+                    echo "| Script Name | Command |"
+                    echo "|-------------|---------|"
+                    prev_subdir="$subdir"
+                  fi
+                else
+                  if [[ "$prev_subdir" != "_root_" ]]; then
+                    echo "| Script Name | Command |"
+                    echo "|-------------|---------|"
+                    prev_subdir="_root_"
+                  fi
+                fi
                 script_name=$(basename "$file")
                 echo "| $script_name | \`bash <(wget -qO- https://dignezzz.github.io/$file)\` |"
               done

@@ -201,7 +201,7 @@ title: DigneZzZ Script Hub
         <div class="text-sm text-gray-500 dark:text-gray-400 mt-1">Скриптов</div>
       </div>
       <div class="glass rounded-2xl p-6 text-center card-hover">
-        <div class="text-3xl font-bold gradient-text">5+</div>
+        <div class="text-3xl font-bold gradient-text">8+</div>
         <div class="text-sm text-gray-500 dark:text-gray-400 mt-1">Категорий</div>
       </div>
       <div class="glass rounded-2xl p-6 text-center card-hover">
@@ -248,7 +248,7 @@ title: DigneZzZ Script Hub
             <span class="text-4xl">🖥️</span>
             <div>
               <h2 class="text-2xl font-bold text-gray-800 dark:text-white">Server</h2>
-              <p class="text-sm text-gray-500 dark:text-gray-400">SSH, swap, firewall, панели</p>
+              <p class="text-sm text-gray-500 dark:text-gray-400">Firewall, VPN, мониторинг, оптимизация, очистка</p>
             </div>
           </div>
         </div>
@@ -293,6 +293,46 @@ title: DigneZzZ Script Hub
           </div>
         </div>
         <div id="shm-content" class="p-6 markdown-content text-gray-700 dark:text-gray-300 max-h-96 overflow-y-auto">
+          <div class="space-y-3">
+            <div class="skeleton h-4 rounded w-3/4"></div>
+            <div class="skeleton h-4 rounded w-full"></div>
+            <div class="skeleton h-4 rounded w-5/6"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- SingBox Card -->
+      <div class="glass rounded-2xl overflow-hidden card-hover">
+        <div class="bg-gradient-to-r from-cyan-600/20 to-blue-600/20 p-6 border-b border-white/10">
+          <div class="flex items-center gap-3">
+            <span class="text-4xl">📡</span>
+            <div>
+              <h2 class="text-2xl font-bold text-gray-800 dark:text-white">SingBox</h2>
+              <p class="text-sm text-gray-500 dark:text-gray-400">VPN-конфиги и маршрутизация</p>
+            </div>
+          </div>
+        </div>
+        <div id="singbox-content" class="p-6 markdown-content text-gray-700 dark:text-gray-300 max-h-96 overflow-y-auto">
+          <div class="space-y-3">
+            <div class="skeleton h-4 rounded w-3/4"></div>
+            <div class="skeleton h-4 rounded w-full"></div>
+            <div class="skeleton h-4 rounded w-5/6"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Tools Card -->
+      <div class="glass rounded-2xl overflow-hidden card-hover">
+        <div class="bg-gradient-to-r from-purple-600/20 to-pink-600/20 p-6 border-b border-white/10">
+          <div class="flex items-center gap-3">
+            <span class="text-4xl">🔧</span>
+            <div>
+              <h2 class="text-2xl font-bold text-gray-800 dark:text-white">Tools</h2>
+              <p class="text-sm text-gray-500 dark:text-gray-400">Standalone-утилиты</p>
+            </div>
+          </div>
+        </div>
+        <div id="tools-content" class="p-6 markdown-content text-gray-700 dark:text-gray-300 max-h-96 overflow-y-auto">
           <div class="space-y-3">
             <div class="skeleton h-4 rounded w-3/4"></div>
             <div class="skeleton h-4 rounded w-full"></div>
@@ -413,6 +453,8 @@ title: DigneZzZ Script Hub
   loadMarkdown('server-content', './server/README.md')
   loadMarkdown('shadowrocket-content', './shadowrocket/readme.md')
   loadMarkdown('shm-content', './shm/README.md')
+  loadMarkdown('singbox-content', './singbox/README.md')
+  loadMarkdown('tools-content', './tools/README.md')
   loadMarkdown('readme-content', './README.md')
 
   // Smooth scroll
