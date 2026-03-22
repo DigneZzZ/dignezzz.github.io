@@ -1,37 +1,3 @@
-# 🚀 Scripts Index
-
-![Build Status](https://github.com/DigneZzZ/dignezzz.github.io/actions/workflows/static.yml/badge.svg)
-
-## marzban
-
-## Scripts in marzban
-
-### backup
-
-| Script Name | Command |
-|-------------|---------|
-| backup.sh | `bash <(wget -qO- https://dignezzz.github.io/marzban/backup/backup.sh)` |
-| backup2.sh | `bash <(wget -qO- https://dignezzz.github.io/marzban/backup/backup2.sh)` |
-| backup2e.sh | `bash <(wget -qO- https://dignezzz.github.io/marzban/backup/backup2e.sh)` |
-
-### firewall
-
-| Script Name | Command |
-|-------------|---------|
-| ufw_main.sh | `bash <(wget -qO- https://dignezzz.github.io/marzban/firewall/ufw_main.sh)` |
-| ufw_node.sh | `bash <(wget -qO- https://dignezzz.github.io/marzban/firewall/ufw_node.sh)` |
-
-### tools
-
-| Script Name | Command |
-|-------------|---------|
-| core_change.sh | `bash <(wget -qO- https://dignezzz.github.io/marzban/tools/core_change.sh)` |
-| migrate_to_mysql.sh | `bash <(wget -qO- https://dignezzz.github.io/marzban/tools/migrate_to_mysql.sh)` |
-
-_Last updated at 2026-03-22 23:25 MSK_
-
-## server
-
 ## Scripts in server
 
 ### cleanup
@@ -83,35 +49,3 @@ _Last updated at 2026-03-22 23:25 MSK_
 | sni2.sh | `bash <(wget -qO- https://dignezzz.github.io/server/vpn/sni2.sh)` |
 
 _Last updated at 2026-03-22 23:25 MSK_
-
-## shm
-
-## Scripts in shm
-
-### backup
-
-| Script Name | Command |
-|-------------|---------|
-| backup.sh | `bash <(wget -qO- https://dignezzz.github.io/shm/backup/backup.sh)` |
-
-_Last updated at 2026-03-22 23:25 MSK_
-
-## tools
-
-## Scripts in tools
-
-| Script Name | Command |
-|-------------|---------|
-| multi_checker.sh | `bash <(wget -qO- https://dignezzz.github.io/tools/multi_checker.sh)` |
-
-_Last updated at 2026-03-22 23:25 MSK_
-
----
-## 📘 Additional Resources
-
-- 🌐 [openode.xyz](https://openode.xyz) — мой форум с закрытыми клубами и подпиской.
-  - 🔒 Внутри — платные статьи и практические гайды по установке и настройке **Marzban** и **Remnawave**.
-
-- ✍️ [neonode.cc](https://neonode.cc) — блог с техническими заметками, статьями и руководствами.
-
-_Global README auto-generated at 2026-03-22 23:25 MSK_
