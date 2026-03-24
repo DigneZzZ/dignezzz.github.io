@@ -28,7 +28,7 @@
 | core_change.sh | `bash <(wget -qO- https://dignezzz.github.io/marzban/tools/core_change.sh)` |
 | migrate_to_mysql.sh | `bash <(wget -qO- https://dignezzz.github.io/marzban/tools/migrate_to_mysql.sh)` |
 
-_Last updated at 2026-03-24 11:14 MSK_
+_Last updated at 2026-03-24 16:34 MSK_
 
 ## server
 
@@ -41,6 +41,9 @@ _Last updated at 2026-03-24 11:14 MSK_
 | dest.sh | `bash <(wget -qO- https://dignezzz.github.io/server/cleanup/dest.sh)` |
 | dest2.sh | `bash <(wget -qO- https://dignezzz.github.io/server/cleanup/dest2.sh)` |
 | safe-cleanup.sh | `bash <(wget -qO- https://dignezzz.github.io/server/cleanup/safe-cleanup.sh)` |
+| Script Name | Command |
+|-------------|---------|
+| dashboard.sh | `bash <(wget -qO- https://dignezzz.github.io/server/dashboard.sh)` |
 
 ### firewall
 
@@ -56,7 +59,6 @@ _Last updated at 2026-03-24 11:14 MSK_
 
 | Script Name | Command |
 |-------------|---------|
-| dashboard.sh | `bash <(wget -qO- https://dignezzz.github.io/server/monitoring/dashboard.sh)` |
 | stpush.sh | `bash <(wget -qO- https://dignezzz.github.io/server/monitoring/stpush.sh)` |
 | trafic.sh | `bash <(wget -qO- https://dignezzz.github.io/server/monitoring/trafic.sh)` |
 
@@ -82,7 +84,7 @@ _Last updated at 2026-03-24 11:14 MSK_
 | sni.sh | `bash <(wget -qO- https://dignezzz.github.io/server/vpn/sni.sh)` |
 | sni2.sh | `bash <(wget -qO- https://dignezzz.github.io/server/vpn/sni2.sh)` |
 
-_Last updated at 2026-03-24 11:14 MSK_
+_Last updated at 2026-03-24 16:34 MSK_
 
 ## shm
 
@@ -94,7 +96,7 @@ _Last updated at 2026-03-24 11:14 MSK_
 |-------------|---------|
 | backup.sh | `bash <(wget -qO- https://dignezzz.github.io/shm/backup/backup.sh)` |
 
-_Last updated at 2026-03-24 11:14 MSK_
+_Last updated at 2026-03-24 16:34 MSK_
 
 ## tools
 
@@ -104,7 +106,7 @@ _Last updated at 2026-03-24 11:14 MSK_
 |-------------|---------|
 | multi_checker.sh | `bash <(wget -qO- https://dignezzz.github.io/tools/multi_checker.sh)` |
 
-_Last updated at 2026-03-24 11:14 MSK_
+_Last updated at 2026-03-24 16:34 MSK_
 
 ---
 ## 📘 Additional Resources
@@ -114,4 +116,4 @@ _Last updated at 2026-03-24 11:14 MSK_
 
 - ✍️ [neonode.cc](https://neonode.cc) — блог с техническими заметками, статьями и руководствами.
 
-_Global README auto-generated at 2026-03-24 11:14 MSK_
+_Global README auto-generated at 2026-03-24 16:34 MSK_

@@ -7,6 +7,9 @@
 | dest.sh | `bash <(wget -qO- https://dignezzz.github.io/server/cleanup/dest.sh)` |
 | dest2.sh | `bash <(wget -qO- https://dignezzz.github.io/server/cleanup/dest2.sh)` |
 | safe-cleanup.sh | `bash <(wget -qO- https://dignezzz.github.io/server/cleanup/safe-cleanup.sh)` |
+| Script Name | Command |
+|-------------|---------|
+| dashboard.sh | `bash <(wget -qO- https://dignezzz.github.io/server/dashboard.sh)` |
 
 ### firewall
 
@@ -22,7 +25,6 @@
 
 | Script Name | Command |
 |-------------|---------|
-| dashboard.sh | `bash <(wget -qO- https://dignezzz.github.io/server/monitoring/dashboard.sh)` |
 | stpush.sh | `bash <(wget -qO- https://dignezzz.github.io/server/monitoring/stpush.sh)` |
 | trafic.sh | `bash <(wget -qO- https://dignezzz.github.io/server/monitoring/trafic.sh)` |
 
@@ -48,4 +50,4 @@
 | sni.sh | `bash <(wget -qO- https://dignezzz.github.io/server/vpn/sni.sh)` |
 | sni2.sh | `bash <(wget -qO- https://dignezzz.github.io/server/vpn/sni2.sh)` |
 
-_Last updated at 2026-03-24 11:14 MSK_
+_Last updated at 2026-03-24 16:34 MSK_
