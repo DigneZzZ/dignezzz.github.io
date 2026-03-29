@@ -22,4 +22,4 @@
 | core_change.sh | `bash <(wget -qO- https://dignezzz.github.io/marzban/tools/core_change.sh)` |
 | migrate_to_mysql.sh | `bash <(wget -qO- https://dignezzz.github.io/marzban/tools/migrate_to_mysql.sh)` |
 
-_Last updated at 2026-03-25 14:03 MSK_
+_Last updated at 2026-03-30 01:17 MSK_

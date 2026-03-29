@@ -28,7 +28,7 @@
 | core_change.sh | `bash <(wget -qO- https://dignezzz.github.io/marzban/tools/core_change.sh)` |
 | migrate_to_mysql.sh | `bash <(wget -qO- https://dignezzz.github.io/marzban/tools/migrate_to_mysql.sh)` |
 
-_Last updated at 2026-03-25 14:03 MSK_
+_Last updated at 2026-03-30 01:17 MSK_
 
 ## server
 
@@ -44,14 +44,13 @@ _Last updated at 2026-03-25 14:03 MSK_
 | Script Name | Command |
 |-------------|---------|
 | dashboard.sh | `bash <(wget -qO- https://dignezzz.github.io/server/dashboard.sh)` |
+| f2b.sh | `bash <(wget -qO- https://dignezzz.github.io/server/f2b.sh)` |
 
 ### firewall
 
 | Script Name | Command |
 |-------------|---------|
 | f2b-e.sh | `bash <(wget -qO- https://dignezzz.github.io/server/firewall/f2b-e.sh)` |
-| f2b.sh | `bash <(wget -qO- https://dignezzz.github.io/server/firewall/f2b.sh)` |
-| security.sh | `bash <(wget -qO- https://dignezzz.github.io/server/firewall/security.sh)` |
 | ufw-check.sh | `bash <(wget -qO- https://dignezzz.github.io/server/firewall/ufw-check.sh)` |
 | ufw-copy.sh | `bash <(wget -qO- https://dignezzz.github.io/server/firewall/ufw-copy.sh)` |
 
@@ -73,6 +72,9 @@ _Last updated at 2026-03-25 14:03 MSK_
 | swap.sh | `bash <(wget -qO- https://dignezzz.github.io/server/optimization/swap.sh)` |
 | sysctl_opt.sh | `bash <(wget -qO- https://dignezzz.github.io/server/optimization/sysctl_opt.sh)` |
 | unlimit_server.sh | `bash <(wget -qO- https://dignezzz.github.io/server/optimization/unlimit_server.sh)` |
+| Script Name | Command |
+|-------------|---------|
+| security.sh | `bash <(wget -qO- https://dignezzz.github.io/server/security.sh)` |
 
 ### vpn
 
@@ -84,7 +86,7 @@ _Last updated at 2026-03-25 14:03 MSK_
 | sni.sh | `bash <(wget -qO- https://dignezzz.github.io/server/vpn/sni.sh)` |
 | sni2.sh | `bash <(wget -qO- https://dignezzz.github.io/server/vpn/sni2.sh)` |
 
-_Last updated at 2026-03-25 14:03 MSK_
+_Last updated at 2026-03-30 01:17 MSK_
 
 ## shm
 
@@ -96,7 +98,7 @@ _Last updated at 2026-03-25 14:03 MSK_
 |-------------|---------|
 | backup.sh | `bash <(wget -qO- https://dignezzz.github.io/shm/backup/backup.sh)` |
 
-_Last updated at 2026-03-25 14:03 MSK_
+_Last updated at 2026-03-30 01:17 MSK_
 
 ## tools
 
@@ -106,7 +108,7 @@ _Last updated at 2026-03-25 14:03 MSK_
 |-------------|---------|
 | multi_checker.sh | `bash <(wget -qO- https://dignezzz.github.io/tools/multi_checker.sh)` |
 
-_Last updated at 2026-03-25 14:03 MSK_
+_Last updated at 2026-03-30 01:17 MSK_
 
 ---
 ## 📘 Additional Resources
@@ -116,4 +118,4 @@ _Last updated at 2026-03-25 14:03 MSK_
 
 - ✍️ [neonode.cc](https://neonode.cc) — блог с техническими заметками, статьями и руководствами.
 
-_Global README auto-generated at 2026-03-25 14:03 MSK_
+_Global README auto-generated at 2026-03-30 01:17 MSK_

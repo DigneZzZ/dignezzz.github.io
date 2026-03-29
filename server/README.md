@@ -10,14 +10,13 @@
 | Script Name | Command |
 |-------------|---------|
 | dashboard.sh | `bash <(wget -qO- https://dignezzz.github.io/server/dashboard.sh)` |
+| f2b.sh | `bash <(wget -qO- https://dignezzz.github.io/server/f2b.sh)` |
 
 ### firewall
 
 | Script Name | Command |
 |-------------|---------|
 | f2b-e.sh | `bash <(wget -qO- https://dignezzz.github.io/server/firewall/f2b-e.sh)` |
-| f2b.sh | `bash <(wget -qO- https://dignezzz.github.io/server/firewall/f2b.sh)` |
-| security.sh | `bash <(wget -qO- https://dignezzz.github.io/server/firewall/security.sh)` |
 | ufw-check.sh | `bash <(wget -qO- https://dignezzz.github.io/server/firewall/ufw-check.sh)` |
 | ufw-copy.sh | `bash <(wget -qO- https://dignezzz.github.io/server/firewall/ufw-copy.sh)` |
 
@@ -39,6 +38,9 @@
 | swap.sh | `bash <(wget -qO- https://dignezzz.github.io/server/optimization/swap.sh)` |
 | sysctl_opt.sh | `bash <(wget -qO- https://dignezzz.github.io/server/optimization/sysctl_opt.sh)` |
 | unlimit_server.sh | `bash <(wget -qO- https://dignezzz.github.io/server/optimization/unlimit_server.sh)` |
+| Script Name | Command |
+|-------------|---------|
+| security.sh | `bash <(wget -qO- https://dignezzz.github.io/server/security.sh)` |
 
 ### vpn
 
@@ -50,4 +52,4 @@
 | sni.sh | `bash <(wget -qO- https://dignezzz.github.io/server/vpn/sni.sh)` |
 | sni2.sh | `bash <(wget -qO- https://dignezzz.github.io/server/vpn/sni2.sh)` |
 
-_Last updated at 2026-03-25 14:03 MSK_
+_Last updated at 2026-03-30 01:17 MSK_
