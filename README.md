@@ -6,89 +6,49 @@
 
 ## Scripts in marzban
 
-### backup
-
 | Script Name | Command |
 |-------------|---------|
-| backup.sh | `bash <(wget -qO- https://dignezzz.github.io/marzban/backup/backup.sh)` |
-| backup2.sh | `bash <(wget -qO- https://dignezzz.github.io/marzban/backup/backup2.sh)` |
-| backup2e.sh | `bash <(wget -qO- https://dignezzz.github.io/marzban/backup/backup2e.sh)` |
+| backup.sh | `bash <(wget -qO- https://dignezzz.github.io/marzban/backup.sh)` |
+| backup2.sh | `bash <(wget -qO- https://dignezzz.github.io/marzban/backup2.sh)` |
+| backup2e.sh | `bash <(wget -qO- https://dignezzz.github.io/marzban/backup2e.sh)` |
+| core_change.sh | `bash <(wget -qO- https://dignezzz.github.io/marzban/core_change.sh)` |
+| migrate_to_mysql.sh | `bash <(wget -qO- https://dignezzz.github.io/marzban/migrate_to_mysql.sh)` |
+| ufw_main.sh | `bash <(wget -qO- https://dignezzz.github.io/marzban/ufw_main.sh)` |
+| ufw_node.sh | `bash <(wget -qO- https://dignezzz.github.io/marzban/ufw_node.sh)` |
 
-### firewall
-
-| Script Name | Command |
-|-------------|---------|
-| ufw_main.sh | `bash <(wget -qO- https://dignezzz.github.io/marzban/firewall/ufw_main.sh)` |
-| ufw_node.sh | `bash <(wget -qO- https://dignezzz.github.io/marzban/firewall/ufw_node.sh)` |
-
-### tools
-
-| Script Name | Command |
-|-------------|---------|
-| core_change.sh | `bash <(wget -qO- https://dignezzz.github.io/marzban/tools/core_change.sh)` |
-| migrate_to_mysql.sh | `bash <(wget -qO- https://dignezzz.github.io/marzban/tools/migrate_to_mysql.sh)` |
-
-_Last updated at 2026-04-03 14:58 MSK_
+_Last updated at 2026-04-03 15:01 MSK_
 
 ## server
 
 ## Scripts in server
 
-### cleanup
-
-| Script Name | Command |
-|-------------|---------|
-| dest.sh | `bash <(wget -qO- https://dignezzz.github.io/server/cleanup/dest.sh)` |
-| dest2.sh | `bash <(wget -qO- https://dignezzz.github.io/server/cleanup/dest2.sh)` |
-| safe-cleanup.sh | `bash <(wget -qO- https://dignezzz.github.io/server/cleanup/safe-cleanup.sh)` |
 | Script Name | Command |
 |-------------|---------|
 | dashboard.sh | `bash <(wget -qO- https://dignezzz.github.io/server/dashboard.sh)` |
+| dedic.sh | `bash <(wget -qO- https://dignezzz.github.io/server/dedic.sh)` |
+| dest.sh | `bash <(wget -qO- https://dignezzz.github.io/server/dest.sh)` |
+| dest2.sh | `bash <(wget -qO- https://dignezzz.github.io/server/dest2.sh)` |
+| f2b-e.sh | `bash <(wget -qO- https://dignezzz.github.io/server/f2b-e.sh)` |
 | f2b.sh | `bash <(wget -qO- https://dignezzz.github.io/server/f2b.sh)` |
-
-### firewall
-
-| Script Name | Command |
-|-------------|---------|
-| f2b-e.sh | `bash <(wget -qO- https://dignezzz.github.io/server/firewall/f2b-e.sh)` |
-| ufw-check.sh | `bash <(wget -qO- https://dignezzz.github.io/server/firewall/ufw-check.sh)` |
-| ufw-copy.sh | `bash <(wget -qO- https://dignezzz.github.io/server/firewall/ufw-copy.sh)` |
-
-### monitoring
-
-| Script Name | Command |
-|-------------|---------|
-| stpush.sh | `bash <(wget -qO- https://dignezzz.github.io/server/monitoring/stpush.sh)` |
-| trafic.sh | `bash <(wget -qO- https://dignezzz.github.io/server/monitoring/trafic.sh)` |
-| Script Name | Command |
-|-------------|---------|
+| init.sh | `bash <(wget -qO- https://dignezzz.github.io/server/init.sh)` |
 | mtproxy.sh | `bash <(wget -qO- https://dignezzz.github.io/server/mtproxy.sh)` |
-
-### optimization
-
-| Script Name | Command |
-|-------------|---------|
-| dedic.sh | `bash <(wget -qO- https://dignezzz.github.io/server/optimization/dedic.sh)` |
-| init.sh | `bash <(wget -qO- https://dignezzz.github.io/server/optimization/init.sh)` |
-| mtu.sh | `bash <(wget -qO- https://dignezzz.github.io/server/optimization/mtu.sh)` |
-| ssh-port.sh | `bash <(wget -qO- https://dignezzz.github.io/server/optimization/ssh-port.sh)` |
-| swap.sh | `bash <(wget -qO- https://dignezzz.github.io/server/optimization/swap.sh)` |
-| sysctl_opt.sh | `bash <(wget -qO- https://dignezzz.github.io/server/optimization/sysctl_opt.sh)` |
-| unlimit_server.sh | `bash <(wget -qO- https://dignezzz.github.io/server/optimization/unlimit_server.sh)` |
-| Script Name | Command |
-|-------------|---------|
+| mtu.sh | `bash <(wget -qO- https://dignezzz.github.io/server/mtu.sh)` |
+| netbird-egress.sh | `bash <(wget -qO- https://dignezzz.github.io/server/netbird-egress.sh)` |
+| reality.sh | `bash <(wget -qO- https://dignezzz.github.io/server/reality.sh)` |
+| safe-cleanup.sh | `bash <(wget -qO- https://dignezzz.github.io/server/safe-cleanup.sh)` |
 | security.sh | `bash <(wget -qO- https://dignezzz.github.io/server/security.sh)` |
+| sni.sh | `bash <(wget -qO- https://dignezzz.github.io/server/sni.sh)` |
+| sni2.sh | `bash <(wget -qO- https://dignezzz.github.io/server/sni2.sh)` |
+| ssh-port.sh | `bash <(wget -qO- https://dignezzz.github.io/server/ssh-port.sh)` |
+| stpush.sh | `bash <(wget -qO- https://dignezzz.github.io/server/stpush.sh)` |
+| swap.sh | `bash <(wget -qO- https://dignezzz.github.io/server/swap.sh)` |
+| sysctl_opt.sh | `bash <(wget -qO- https://dignezzz.github.io/server/sysctl_opt.sh)` |
+| trafic.sh | `bash <(wget -qO- https://dignezzz.github.io/server/trafic.sh)` |
+| ufw-check.sh | `bash <(wget -qO- https://dignezzz.github.io/server/ufw-check.sh)` |
+| ufw-copy.sh | `bash <(wget -qO- https://dignezzz.github.io/server/ufw-copy.sh)` |
+| unlimit_server.sh | `bash <(wget -qO- https://dignezzz.github.io/server/unlimit_server.sh)` |
 
-### vpn
-
-| Script Name | Command |
-|-------------|---------|
-| netbird-egress.sh | `bash <(wget -qO- https://dignezzz.github.io/server/vpn/netbird-egress.sh)` |
-| reality.sh | `bash <(wget -qO- https://dignezzz.github.io/server/vpn/reality.sh)` |
-| sni.sh | `bash <(wget -qO- https://dignezzz.github.io/server/vpn/sni.sh)` |
-| sni2.sh | `bash <(wget -qO- https://dignezzz.github.io/server/vpn/sni2.sh)` |
-
-_Last updated at 2026-04-03 14:58 MSK_
+_Last updated at 2026-04-03 15:01 MSK_
 
 ## shm
 
@@ -100,7 +60,7 @@ _Last updated at 2026-04-03 14:58 MSK_
 |-------------|---------|
 | backup.sh | `bash <(wget -qO- https://dignezzz.github.io/shm/backup/backup.sh)` |
 
-_Last updated at 2026-04-03 14:58 MSK_
+_Last updated at 2026-04-03 15:01 MSK_
 
 ## tools
 
@@ -110,7 +70,7 @@ _Last updated at 2026-04-03 14:58 MSK_
 |-------------|---------|
 | multi_checker.sh | `bash <(wget -qO- https://dignezzz.github.io/tools/multi_checker.sh)` |
 
-_Last updated at 2026-04-03 14:58 MSK_
+_Last updated at 2026-04-03 15:01 MSK_
 
 ---
 ## 📘 Additional Resources
@@ -120,4 +80,4 @@ _Last updated at 2026-04-03 14:58 MSK_
 
 - ✍️ [neonode.cc](https://neonode.cc) — блог с техническими заметками, статьями и руководствами.
 
-_Global README auto-generated at 2026-04-03 14:58 MSK_
+_Global README auto-generated at 2026-04-03 15:01 MSK_

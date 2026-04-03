@@ -1,25 +1,13 @@
 ## Scripts in marzban
 
-### backup
-
 | Script Name | Command |
 |-------------|---------|
-| backup.sh | `bash <(wget -qO- https://dignezzz.github.io/marzban/backup/backup.sh)` |
-| backup2.sh | `bash <(wget -qO- https://dignezzz.github.io/marzban/backup/backup2.sh)` |
-| backup2e.sh | `bash <(wget -qO- https://dignezzz.github.io/marzban/backup/backup2e.sh)` |
+| backup.sh | `bash <(wget -qO- https://dignezzz.github.io/marzban/backup.sh)` |
+| backup2.sh | `bash <(wget -qO- https://dignezzz.github.io/marzban/backup2.sh)` |
+| backup2e.sh | `bash <(wget -qO- https://dignezzz.github.io/marzban/backup2e.sh)` |
+| core_change.sh | `bash <(wget -qO- https://dignezzz.github.io/marzban/core_change.sh)` |
+| migrate_to_mysql.sh | `bash <(wget -qO- https://dignezzz.github.io/marzban/migrate_to_mysql.sh)` |
+| ufw_main.sh | `bash <(wget -qO- https://dignezzz.github.io/marzban/ufw_main.sh)` |
+| ufw_node.sh | `bash <(wget -qO- https://dignezzz.github.io/marzban/ufw_node.sh)` |
 
-### firewall
-
-| Script Name | Command |
-|-------------|---------|
-| ufw_main.sh | `bash <(wget -qO- https://dignezzz.github.io/marzban/firewall/ufw_main.sh)` |
-| ufw_node.sh | `bash <(wget -qO- https://dignezzz.github.io/marzban/firewall/ufw_node.sh)` |
-
-### tools
-
-| Script Name | Command |
-|-------------|---------|
-| core_change.sh | `bash <(wget -qO- https://dignezzz.github.io/marzban/tools/core_change.sh)` |
-| migrate_to_mysql.sh | `bash <(wget -qO- https://dignezzz.github.io/marzban/tools/migrate_to_mysql.sh)` |
-
-_Last updated at 2026-04-03 14:58 MSK_
+_Last updated at 2026-04-03 15:01 MSK_
