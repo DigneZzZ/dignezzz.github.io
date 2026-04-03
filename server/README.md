@@ -26,6 +26,9 @@
 |-------------|---------|
 | stpush.sh | `bash <(wget -qO- https://dignezzz.github.io/server/monitoring/stpush.sh)` |
 | trafic.sh | `bash <(wget -qO- https://dignezzz.github.io/server/monitoring/trafic.sh)` |
+| Script Name | Command |
+|-------------|---------|
+| mtproxy.sh | `bash <(wget -qO- https://dignezzz.github.io/server/mtproxy.sh)` |
 
 ### optimization
 
@@ -46,10 +49,9 @@
 
 | Script Name | Command |
 |-------------|---------|
-| mtproxy.sh | `bash <(wget -qO- https://dignezzz.github.io/server/vpn/mtproxy.sh)` |
 | netbird-egress.sh | `bash <(wget -qO- https://dignezzz.github.io/server/vpn/netbird-egress.sh)` |
 | reality.sh | `bash <(wget -qO- https://dignezzz.github.io/server/vpn/reality.sh)` |
 | sni.sh | `bash <(wget -qO- https://dignezzz.github.io/server/vpn/sni.sh)` |
 | sni2.sh | `bash <(wget -qO- https://dignezzz.github.io/server/vpn/sni2.sh)` |
 
-_Last updated at 2026-03-30 01:17 MSK_
+_Last updated at 2026-04-03 14:58 MSK_
