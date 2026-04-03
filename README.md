@@ -28,7 +28,7 @@
 | core_change.sh | `bash <(wget -qO- https://dignezzz.github.io/marzban/tools/core_change.sh)` |
 | migrate_to_mysql.sh | `bash <(wget -qO- https://dignezzz.github.io/marzban/tools/migrate_to_mysql.sh)` |
 
-_Last updated at 2026-03-30 01:17 MSK_
+_Last updated at 2026-04-03 14:58 MSK_
 
 ## server
 
@@ -60,6 +60,9 @@ _Last updated at 2026-03-30 01:17 MSK_
 |-------------|---------|
 | stpush.sh | `bash <(wget -qO- https://dignezzz.github.io/server/monitoring/stpush.sh)` |
 | trafic.sh | `bash <(wget -qO- https://dignezzz.github.io/server/monitoring/trafic.sh)` |
+| Script Name | Command |
+|-------------|---------|
+| mtproxy.sh | `bash <(wget -qO- https://dignezzz.github.io/server/mtproxy.sh)` |
 
 ### optimization
 
@@ -80,13 +83,12 @@ _Last updated at 2026-03-30 01:17 MSK_
 
 | Script Name | Command |
 |-------------|---------|
-| mtproxy.sh | `bash <(wget -qO- https://dignezzz.github.io/server/vpn/mtproxy.sh)` |
 | netbird-egress.sh | `bash <(wget -qO- https://dignezzz.github.io/server/vpn/netbird-egress.sh)` |
 | reality.sh | `bash <(wget -qO- https://dignezzz.github.io/server/vpn/reality.sh)` |
 | sni.sh | `bash <(wget -qO- https://dignezzz.github.io/server/vpn/sni.sh)` |
 | sni2.sh | `bash <(wget -qO- https://dignezzz.github.io/server/vpn/sni2.sh)` |
 
-_Last updated at 2026-03-30 01:17 MSK_
+_Last updated at 2026-04-03 14:58 MSK_
 
 ## shm
 
@@ -98,7 +100,7 @@ _Last updated at 2026-03-30 01:17 MSK_
 |-------------|---------|
 | backup.sh | `bash <(wget -qO- https://dignezzz.github.io/shm/backup/backup.sh)` |
 
-_Last updated at 2026-03-30 01:17 MSK_
+_Last updated at 2026-04-03 14:58 MSK_
 
 ## tools
 
@@ -108,7 +110,7 @@ _Last updated at 2026-03-30 01:17 MSK_
 |-------------|---------|
 | multi_checker.sh | `bash <(wget -qO- https://dignezzz.github.io/tools/multi_checker.sh)` |
 
-_Last updated at 2026-03-30 01:17 MSK_
+_Last updated at 2026-04-03 14:58 MSK_
 
 ---
 ## 📘 Additional Resources
@@ -118,4 +120,4 @@ _Last updated at 2026-03-30 01:17 MSK_
 
 - ✍️ [neonode.cc](https://neonode.cc) — блог с техническими заметками, статьями и руководствами.
 
-_Global README auto-generated at 2026-03-30 01:17 MSK_
+_Global README auto-generated at 2026-04-03 14:58 MSK_
