@@ -62,8 +62,12 @@ require_root(){
 confirm(){
   local prompt="${1:-Continue?}"
   [[ "$NONINTERACTIVE" == "1" ]] && return 0
-  read -rp "$prompt [y/N] " reply
-  [[ "$reply" =~ ^[YyДд]$ ]]
+  local reply=""
+  read -rp "$prompt [y/N] " reply || return 1
+  case "${reply,,}" in
+    y|yes|д|да|у) return 0 ;;
+    *)            return 1 ;;
+  esac
 }
 
 # ═════════════════════════════════════════════════════════════════════
