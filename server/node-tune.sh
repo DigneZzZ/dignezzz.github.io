@@ -61,12 +61,17 @@ require_root(){
 
 confirm(){
   local prompt="${1:-Continue?}"
-  [[ "$NONINTERACTIVE" == "1" ]] && return 0
+  if [[ "$NONINTERACTIVE" == "1" ]]; then
+    return 0
+  fi
   local reply=""
-  read -rp "$prompt [y/N] " reply || return 1
+  read -rp "$prompt [y/N] " reply || true
+  # Убираем CR (Windows SSH-клиенты) и пробелы
+  reply="${reply//$'\r'/}"
+  reply="${reply//[[:space:]]/}"
   case "${reply,,}" in
-    y|yes|д|да|у) return 0 ;;
-    *)            return 1 ;;
+    y|yes|yeah|yep|д|да|у) return 0 ;;
+    *)                     return 1 ;;
   esac
 }
 
