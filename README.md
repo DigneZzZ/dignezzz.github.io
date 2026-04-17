@@ -16,7 +16,7 @@
 | ufw_main.sh | `bash <(wget -qO- https://dignezzz.github.io/marzban/ufw_main.sh)` |
 | ufw_node.sh | `bash <(wget -qO- https://dignezzz.github.io/marzban/ufw_node.sh)` |
 
-_Last updated at 2026-04-03 15:01 MSK_
+_Last updated at 2026-04-17 19:04 MSK_
 
 ## server
 
@@ -34,6 +34,7 @@ _Last updated at 2026-04-03 15:01 MSK_
 | mtproxy.sh | `bash <(wget -qO- https://dignezzz.github.io/server/mtproxy.sh)` |
 | mtu.sh | `bash <(wget -qO- https://dignezzz.github.io/server/mtu.sh)` |
 | netbird-egress.sh | `bash <(wget -qO- https://dignezzz.github.io/server/netbird-egress.sh)` |
+| node-tune.sh | `bash <(wget -qO- https://dignezzz.github.io/server/node-tune.sh)` |
 | reality.sh | `bash <(wget -qO- https://dignezzz.github.io/server/reality.sh)` |
 | safe-cleanup.sh | `bash <(wget -qO- https://dignezzz.github.io/server/safe-cleanup.sh)` |
 | security.sh | `bash <(wget -qO- https://dignezzz.github.io/server/security.sh)` |
@@ -48,7 +49,7 @@ _Last updated at 2026-04-03 15:01 MSK_
 | ufw-copy.sh | `bash <(wget -qO- https://dignezzz.github.io/server/ufw-copy.sh)` |
 | unlimit_server.sh | `bash <(wget -qO- https://dignezzz.github.io/server/unlimit_server.sh)` |
 
-_Last updated at 2026-04-03 15:01 MSK_
+_Last updated at 2026-04-17 19:04 MSK_
 
 ## shm
 
@@ -60,7 +61,7 @@ _Last updated at 2026-04-03 15:01 MSK_
 |-------------|---------|
 | backup.sh | `bash <(wget -qO- https://dignezzz.github.io/shm/backup/backup.sh)` |
 
-_Last updated at 2026-04-03 15:01 MSK_
+_Last updated at 2026-04-17 19:04 MSK_
 
 ## tools
 
@@ -70,7 +71,7 @@ _Last updated at 2026-04-03 15:01 MSK_
 |-------------|---------|
 | multi_checker.sh | `bash <(wget -qO- https://dignezzz.github.io/tools/multi_checker.sh)` |
 
-_Last updated at 2026-04-03 15:01 MSK_
+_Last updated at 2026-04-17 19:04 MSK_
 
 ---
 ## 📘 Additional Resources
@@ -80,4 +81,4 @@ _Last updated at 2026-04-03 15:01 MSK_
 
 - ✍️ [neonode.cc](https://neonode.cc) — блог с техническими заметками, статьями и руководствами.
 
-_Global README auto-generated at 2026-04-03 15:01 MSK_
+_Global README auto-generated at 2026-04-17 19:04 MSK_
