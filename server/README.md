@@ -12,6 +12,7 @@
 | mtproxy.sh | `bash <(wget -qO- https://dignezzz.github.io/server/mtproxy.sh)` |
 | mtu.sh | `bash <(wget -qO- https://dignezzz.github.io/server/mtu.sh)` |
 | netbird-egress.sh | `bash <(wget -qO- https://dignezzz.github.io/server/netbird-egress.sh)` |
+| node-tune.sh | `bash <(wget -qO- https://dignezzz.github.io/server/node-tune.sh)` |
 | reality.sh | `bash <(wget -qO- https://dignezzz.github.io/server/reality.sh)` |
 | safe-cleanup.sh | `bash <(wget -qO- https://dignezzz.github.io/server/safe-cleanup.sh)` |
 | security.sh | `bash <(wget -qO- https://dignezzz.github.io/server/security.sh)` |
@@ -26,4 +27,4 @@
 | ufw-copy.sh | `bash <(wget -qO- https://dignezzz.github.io/server/ufw-copy.sh)` |
 | unlimit_server.sh | `bash <(wget -qO- https://dignezzz.github.io/server/unlimit_server.sh)` |
 
-_Last updated at 2026-04-03 15:01 MSK_
+_Last updated at 2026-04-17 19:04 MSK_
