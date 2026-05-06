@@ -17,6 +17,8 @@ readonly NC='\e[0m'  # No Color
 # Конфигурация
 readonly SSHD_CONFIG="/etc/ssh/sshd_config"
 readonly SOCKET_FILE="/lib/systemd/system/ssh.socket"
+readonly SOCKET_OVERRIDE_DIR="/etc/systemd/system/ssh.socket.d"
+readonly SOCKET_OVERRIDE_FILE="/etc/systemd/system/ssh.socket.d/override.conf"
 readonly SCRIPT_NAME="ssh-port-changer"
 
 # Глобальные переменные
@@ -86,6 +88,15 @@ get_current_port() {
     echo "${port:-22}"  # Порт по умолчанию
 }
 
+# Реальный порт, на котором сейчас слушает sshd (по данным ss).
+# На Ubuntu 24.04 с socket-активацией значение из sshd_config может расходиться
+# с фактическим listen-портом, поэтому ориентируемся на ss.
+get_active_ssh_port() {
+    command -v ss >/dev/null 2>&1 || return 0
+    ss -tlnpH 2>/dev/null \
+        | awk '/"sshd"/ {n=split($4,a,":"); print a[n]; exit}'
+}
+
 ensure_port_directive_exists() {
     local file="$1"
     grep -qE '^\s*#?\s*Port\s+[0-9]+' "$file" || echo "Port 22" >> "$file"
@@ -138,38 +149,67 @@ show_service_logs() {
     done
 }
 
-reload_ssh_services() {
-    local version="$1"
-    
-    # Специальная логика для Ubuntu 24.04 с socket-активацией
-    if [[ "$version" == "24.04" ]]; then
-        log_info "Using socket-activated SSH on Ubuntu 24.04"
-        systemctl daemon-reexec
-        systemctl daemon-reload
-        systemctl restart ssh.socket
-        systemctl restart ssh.service
-        return $?
+has_ssh_socket() {
+    [[ -f "$SOCKET_FILE" ]] || systemctl list-unit-files ssh.socket 2>/dev/null | grep -q '^ssh\.socket'
+}
+
+# Создаём drop-in override для ssh.socket вместо правки /lib/systemd/...
+# Формат "ListenStream=" сначала сбрасывает все ListenStream из основного юнита,
+# затем задаём нужный порт. Это устойчиво к любому исходному формату строки.
+configure_ssh_socket_override() {
+    local port="$1"
+    log_info "Configuring ssh.socket drop-in override for port $port..."
+    mkdir -p "$SOCKET_OVERRIDE_DIR"
+    cat > "$SOCKET_OVERRIDE_FILE" <<EOF
+# Managed by $SCRIPT_NAME — do not edit manually
+[Socket]
+ListenStream=
+ListenStream=$port
+EOF
+    log_success "Created socket override: $SOCKET_OVERRIDE_FILE"
+
+    # Предупреждаем, если /lib/systemd/system/ssh.socket повреждён предыдущей
+    # (багованной) версией скрипта (например, "ListenStream=5322.0.0.0:22").
+    if [[ -f "$SOCKET_FILE" ]] && grep -qE '^ListenStream=[0-9]{4,}\.' "$SOCKET_FILE"; then
+        log_warning "$SOCKET_FILE looks corrupted (likely from an older buggy run)."
+        log_warning "Override will take precedence, but consider running:"
+        log_warning "  apt install --reinstall openssh-server"
     fi
-    
+}
+
+reload_ssh_services() {
+    log_info "Reloading systemd configuration..."
+    systemctl daemon-reload
+
+    # На socket-активированных системах перезапуск ssh.socket обязателен:
+    # именно он держит listening port. ssh.service после этого тоже рестартим,
+    # чтобы подхватился sshd_config.
+    if has_ssh_socket; then
+        log_info "Restarting ssh.socket..."
+        if ! systemctl restart ssh.socket 2>/dev/null; then
+            log_warning "Failed to restart ssh.socket (may be inactive — continuing)"
+        fi
+    fi
+
     local ssh_service
     ssh_service=$(get_ssh_service_name) || die "Cannot determine SSH service name"
-    
+
     log_info "Restarting SSH service: $ssh_service"
-    
+
     if ! systemctl restart "$ssh_service"; then
         log_error "Failed to restart SSH service $ssh_service"
         show_service_logs "$ssh_service"
         return 1
     fi
-    
+
     sleep 2
-    
+
     if ! systemctl is-active --quiet "$ssh_service"; then
         log_error "SSH service $ssh_service failed to start after restart"
         show_service_logs "$ssh_service"
         return 1
     fi
-    
+
     log_success "SSH service $ssh_service restarted successfully"
     return 0
 }
@@ -492,10 +532,12 @@ main() {
     
     parse_arguments "$@"
     
-    local current_port
+    local current_port active_port
     current_port=$(get_current_port "$SSHD_CONFIG")
-    log_info "Current SSH port: $current_port"
-    
+    active_port=$(get_active_ssh_port)
+    log_info "Current SSH port (sshd_config): $current_port"
+    [[ -n "$active_port" ]] && log_info "Active listening port:    $active_port"
+
     # Интерактивный ввод порта
     if [[ -z "$NEW_PORT" ]] && [[ "$AUTO_YES" -eq 0 ]]; then
         while true; do
@@ -504,37 +546,49 @@ main() {
             log_error "Invalid port number. Must be between 1 and 65535."
         done
     fi
-    
+
     # Валидация
     validate_port "$NEW_PORT" || die "Invalid or missing port. Use --port <1-65535>."
-    [[ "$NEW_PORT" != "$current_port" ]] || {
-        log_warning "The new port is the same as the current SSH port. No changes needed."
+
+    # "Ничего не делать" только если оба порта (конфиг и реальный) уже совпадают с целевым.
+    # Если sshd_config = NEW_PORT, но реально слушает другой — продолжаем, чтобы починить.
+    if [[ "$NEW_PORT" == "$current_port" ]] \
+       && { [[ -z "$active_port" ]] || [[ "$NEW_PORT" == "$active_port" ]]; }; then
+        log_warning "Port $NEW_PORT is already configured and active. No changes needed."
         exit 0
-    }
-    is_port_in_use "$NEW_PORT" && die "Port $NEW_PORT is already in use."
-    
+    fi
+
+    if [[ "$NEW_PORT" == "$current_port" ]] && [[ -n "$active_port" ]] && [[ "$NEW_PORT" != "$active_port" ]]; then
+        log_warning "sshd_config already has Port $NEW_PORT, but service listens on $active_port."
+        log_warning "Will fix socket override and restart SSH to align."
+    fi
+
+    # Порт может быть "занят" нашим же sshd — это не повод падать.
+    if [[ "$NEW_PORT" != "$active_port" ]]; then
+        is_port_in_use "$NEW_PORT" && die "Port $NEW_PORT is already in use."
+    fi
+
     # Изменение конфигурации
     backup_file "$SSHD_CONFIG"
     ensure_port_directive_exists "$SSHD_CONFIG"
     change_port_in_config "$SSHD_CONFIG" "$NEW_PORT"
-    
-    # Обновление socket-файла для Ubuntu 24.04
-    if [[ "$os_version" == "24.04" ]] && [[ -f "$SOCKET_FILE" ]]; then
-        backup_file "$SOCKET_FILE"
-        sed -i -E "s/ListenStream=\s*[0-9]+/ListenStream=$NEW_PORT/" "$SOCKET_FILE"
-        log_success "Updated ListenStream in: $SOCKET_FILE"
+
+    # На системах с ssh.socket (Ubuntu 22.10+/24.04+) задаём порт через drop-in override —
+    # это надёжнее, чем sed по /lib/systemd/system/ssh.socket.
+    if has_ssh_socket; then
+        configure_ssh_socket_override "$NEW_PORT"
     fi
-    
+
     # Проверка конфигурации
     if ! test_ssh_config; then
         restore_from_backup
         exit 1
     fi
-    
+
     # Настройка SELinux и перезапуск сервиса
     configure_selinux "$NEW_PORT"
-    
-    if ! reload_ssh_services "$os_version"; then
+
+    if ! reload_ssh_services; then
         log_error "Failed to restart SSH service."
         exit 1
     fi

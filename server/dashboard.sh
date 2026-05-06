@@ -1398,7 +1398,7 @@ if [ "$SHOW_NETBIRD" = true ]; then
                 # Connected peers
                 nb_peers=$(echo "$nb_status_output" | grep -i 'Peers count:' | awk '{print $NF}')
                 # Interface
-                nb_iface=$(echo "$nb_status_output" | grep -i 'Interface type:' | awk -F: '{gsub(/^[ \t]+/,"",\$2); print \$2}')
+                nb_iface=$(echo "$nb_status_output" | grep -i 'Interface type:' | awk -F: '{gsub(/^[ \t]+/,"",$2); print $2}')
 
                 # Build status message
                 if [ "$nb_mgmt" = "Connected" ]; then
@@ -1419,7 +1419,7 @@ if [ "$SHOW_NETBIRD" = true ]; then
                 echo "$nb_status_output" | grep -qi 'DNS:.*true\|DNS:.*enabled' && nb_features="DNS"
                 echo "$nb_status_output" | grep -qi 'Rosenpass:.*true\|Rosenpass:.*enabled' && nb_features="${nb_features:+$nb_features, }Rosenpass"
                 echo "$nb_status_output" | grep -qi 'Routes:' && {
-                    nb_routes=$(echo "$nb_status_output" | grep -i 'Routes:' | awk -F: '{gsub(/^[ \t]+/,"",\$2); print \$2}')
+                    nb_routes=$(echo "$nb_status_output" | grep -i 'Routes:' | awk -F: '{gsub(/^[ \t]+/,"",$2); print $2}')
                     [ -n "$nb_routes" ] && [ "$nb_routes" != "-" ] && nb_features="${nb_features:+$nb_features, }Routes"
                 }
                 [ -n "$nb_features" ] && nb_extra_lines="${nb_extra_lines:+$nb_extra_lines | }Features: $nb_features"
