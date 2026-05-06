@@ -27,4 +27,4 @@
 | ufw-copy.sh | `bash <(wget -qO- https://dignezzz.github.io/server/ufw-copy.sh)` |
 | unlimit_server.sh | `bash <(wget -qO- https://dignezzz.github.io/server/unlimit_server.sh)` |
 
-_Last updated at 2026-04-17 20:14 MSK_
+_Last updated at 2026-05-06 11:24 MSK_
