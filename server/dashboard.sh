@@ -5,7 +5,7 @@
 # ============================================================================
 # Description: Modern, configurable MOTD dashboard for Linux servers
 # Author: DigneZzZ - https://gig.ovh
-# Version: 2025.12.18.3
+# Version: 2026.06.10.1
 # License: MIT
 # ============================================================================
 
@@ -14,7 +14,7 @@ set -euo pipefail  # Exit on error, undefined variable, pipe failure
 # ============================================================================
 # CONSTANTS
 # ============================================================================
-readonly SCRIPT_VERSION="2026.03.18.1"
+readonly SCRIPT_VERSION="2026.06.10.1"
 readonly SCRIPT_NAME="GIG MOTD Dashboard"
 readonly REMOTE_URL="https://dignezzz.github.io/server/dashboard.sh"
 
@@ -67,16 +67,20 @@ print_header() {
     echo ""
 }
 
+# Внимание: возвращаем 0 в quiet-режиме, иначе set -e завершит скрипт
 info() {
-    [ "$QUIET_MODE" = false ] && echo "$(_blue "ℹ️")  $*"
+    [ "$QUIET_MODE" = true ] && return 0
+    echo "$(_blue "ℹ️")  $*"
 }
 
 success() {
-    [ "$QUIET_MODE" = false ] && echo "$(_green "✅") $*"
+    [ "$QUIET_MODE" = true ] && return 0
+    echo "$(_green "✅") $*"
 }
 
 warning() {
-    [ "$QUIET_MODE" = false ] && echo "$(_yellow "⚠️")  $*"
+    [ "$QUIET_MODE" = true ] && return 0
+    echo "$(_yellow "⚠️")  $*"
 }
 
 error_exit() {
@@ -149,7 +153,9 @@ setup_paths_for_os() {
             ;;
         rhel|*)
             DASHBOARD_FILE="/etc/profile.d/motd.sh"
-            [ "$OS_TYPE" = "unknown" ] && warning "Using fallback paths for unknown OS"
+            if [ "$OS_TYPE" = "unknown" ]; then
+                warning "Using fallback paths for unknown OS"
+            fi
             ;;
     esac
 }
@@ -247,25 +253,6 @@ parse_arguments() {
     done
 }
 
-# ============================================================================
-# INITIALIZATION
-# ============================================================================
-
-# Detect OS and setup paths
-detect_os
-setup_paths_for_os
-
-# Create directories if needed
-if [ "$INSTALL_USER_MODE" = true ]; then
-    mkdir -p "$(dirname "$DASHBOARD_FILE")" "$(dirname "$MOTD_CONFIG_TOOL")"
-else
-    # For RHEL-based systems, ensure /etc/profile.d exists
-    if [ "$OS_TYPE" = "rhel" ]; then
-        mkdir -p /etc/profile.d
-    fi
-fi
-
-
 # === Функция: Установка CLI утилиты motd (viewer) ===
 install_motd_viewer() {
     echo "📥 Установка команды motd в $MOTD_VIEWER"
@@ -336,9 +323,12 @@ TARGET_FILE="$CONFIG_GLOBAL"
 [ ! -w "$CONFIG_GLOBAL" ] && TARGET_FILE="$CONFIG_USER"
 
 DASHBOARD_FILE_GLOBAL="/etc/update-motd.d/99-dashboard"
-DASHBOARD_FILE_USER="$HOME/.config/gig-motd/99-dashboard"
+DASHBOARD_FILE_RHEL="/etc/profile.d/motd.sh"
+DASHBOARD_FILE_USER="$HOME/.config/gig-motd/dashboard.sh"
 TOOL_PATH_GLOBAL="/usr/local/bin/motd-config"
 TOOL_PATH_USER="$HOME/.local/bin/motd-config"
+VIEWER_PATH_GLOBAL="/usr/local/bin/motd"
+VIEWER_PATH_USER="$HOME/.local/bin/motd"
 
 OPTIONS=(
   SHOW_UPTIME
@@ -605,11 +595,14 @@ uninstall_dashboard() {
   if [[ "$confirm" =~ ^[Yy]$ ]]; then
     echo "🗑 Удаляем дашборд и конфиги..."
 
-    sudo rm -f "$DASHBOARD_FILE_GLOBAL"
+    sudo rm -f "$DASHBOARD_FILE_GLOBAL" "$DASHBOARD_FILE_RHEL"
     rm -f "$DASHBOARD_FILE_USER"
 
     sudo rm -f "$TOOL_PATH_GLOBAL"
     rm -f "$TOOL_PATH_USER"
+
+    sudo rm -f "$VIEWER_PATH_GLOBAL"
+    rm -f "$VIEWER_PATH_USER"
 
     sudo rm -f "$CONFIG_GLOBAL"
     rm -f "$CONFIG_USER"
@@ -658,7 +651,7 @@ migrate_motd_config() {
         if ! grep -q "^${option}=" "$config_file" 2>/dev/null; then
             echo "  ➕ Добавляю: ${option}=${NEW_OPTIONS[$option]}"
             echo "" >> "$config_file"
-            echo "# Added in v2025.12.14.1" >> "$config_file"
+            echo "# Added in v${SCRIPT_VERSION}" >> "$config_file"
             echo "${option}=${NEW_OPTIONS[$option]}" >> "$config_file"
             updated=true
         fi
@@ -755,17 +748,29 @@ parse_arguments "$@"
 
 # === Проверка прав ===
 if [ "$EUID" -ne 0 ] && [ "$INSTALL_USER_MODE" = false ]; then
-    echo "❌ Пожалуйста, запусти от root или с флагом --not-root"
-    exit 1
+    error_exit "Пожалуйста, запусти от root или с флагом --not-root"
 fi
+
+# Детект ОС и настройка путей — строго после разбора аргументов,
+# т.к. пути зависят от --not-root, а вывод от --quiet
+detect_os
+setup_paths_for_os
+
+# Создание целевых каталогов
+if [ "$INSTALL_USER_MODE" = true ]; then
+    mkdir -p "$(dirname "$DASHBOARD_FILE")" "$(dirname "$MOTD_CONFIG_TOOL")"
+else
+    mkdir -p "$(dirname "$DASHBOARD_FILE")"
+fi
+
 TMP_FILE=$(mktemp)
+trap 'rm -f "$TMP_FILE"' EXIT
 
 # === Установка/проверка зависимостей ===
 install_dependencies() {
     local MISSING=()
     local REQUIRED_CMDS="curl hostname awk grep cut uname df free top ip uptime"
-    local OPTIONAL_CMDS="vnstat"
-    
+
     # Проверяем обязательные утилиты
     for CMD in $REQUIRED_CMDS; do
         if ! command -v "$CMD" &>/dev/null; then
@@ -850,34 +855,14 @@ install_dependencies() {
     fi
 }
 
-if [ "$EUID" -ne 0 ]; then
-    # Для не-root просто проверяем наличие утилит
-    MISSING=()
-    for CMD in curl hostname awk grep cut uname df free top ip uptime vnstat; do
-        if ! command -v "$CMD" &>/dev/null; then
-            MISSING+=("$CMD")
-        fi
-    done
-    if (( ${#MISSING[@]} )); then
-        echo "❌ Не хватает обязательных утилит: ${MISSING[*]}"
-        echo "🛠 Пожалуйста, установи их командой (под root):"
-        echo "    sudo apt install curl coreutils net-tools procps iproute2 vnstat -y"
-        echo "🔁 После этого снова запусти установку."
-        exit 1
-    fi
-else
-    # Для root устанавливаем зависимости автоматически
-    install_dependencies
-fi
+# Проверка/установка зависимостей (внутри ветвится по root/не-root)
+install_dependencies
 
 # === Создание dashboard-файла ===
-if [ "$INSTALL_USER_MODE" = false ]; then
-    mkdir -p /etc/update-motd.d
-fi
 cat > "$TMP_FILE" << 'EOF'
 #!/bin/bash
 
-CURRENT_VERSION="2025.03.18.1"
+CURRENT_VERSION="2026.06.10.1"
 REMOTE_URL="https://dignezzz.github.io/server/dashboard.sh"
 CONFIG_GLOBAL="/etc/motdrc"
 
@@ -1203,13 +1188,15 @@ if [ "$SHOW_LAST_LOGIN" = true ]; then
     [ -z "$last_login" ] && last_login="n/a"
 fi
 
-# Неудачные попытки входа за 24ч (только если включено)
+# Неудачные попытки входа за сегодня (только если включено)
+# %e даёт день с ведущим пробелом ("Jun  9"), как в syslog; %d дал бы "09" и ничего не находил
 if [ "$SHOW_FAILED_LOGINS" = true ]; then
     failed_logins=0
+    _today_pattern=$(date '+%b %e')
     if [ -f /var/log/auth.log ]; then
-        failed_logins=$(grep "Failed password" /var/log/auth.log 2>/dev/null | grep "$(date +%b) $(date +%d)" | wc -l)
+        failed_logins=$(grep "Failed password" /var/log/auth.log 2>/dev/null | grep -c "$_today_pattern")
     elif [ -f /var/log/secure ]; then
-        failed_logins=$(grep "Failed password" /var/log/secure 2>/dev/null | grep "$(date +%b) $(date +%d)" | wc -l)
+        failed_logins=$(grep "Failed password" /var/log/secure 2>/dev/null | grep -c "$_today_pattern")
     fi
 fi
 
@@ -1850,6 +1837,5 @@ else
         finalize_installation
     else
         echo "❌ Установка отменена."
-        rm -f "$TMP_FILE"
     fi
 fi
