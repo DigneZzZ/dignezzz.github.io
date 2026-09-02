@@ -16,7 +16,7 @@
 | ufw_main.sh | `bash <(wget -qO- https://dignezzz.github.io/marzban/ufw_main.sh)` |
 | ufw_node.sh | `bash <(wget -qO- https://dignezzz.github.io/marzban/ufw_node.sh)` |
 
-_Last updated at 2026-09-01 00:54 MSK_
+_Last updated at 2026-09-02 09:25 MSK_
 
 ## server
 
@@ -44,12 +44,13 @@ _Last updated at 2026-09-01 00:54 MSK_
 | stpush.sh | `bash <(wget -qO- https://dignezzz.github.io/server/stpush.sh)` |
 | swap.sh | `bash <(wget -qO- https://dignezzz.github.io/server/swap.sh)` |
 | sysctl_opt.sh | `bash <(wget -qO- https://dignezzz.github.io/server/sysctl_opt.sh)` |
+| tg-webproxy.sh | `bash <(wget -qO- https://dignezzz.github.io/server/tg-webproxy.sh)` |
 | trafic.sh | `bash <(wget -qO- https://dignezzz.github.io/server/trafic.sh)` |
 | ufw-check.sh | `bash <(wget -qO- https://dignezzz.github.io/server/ufw-check.sh)` |
 | ufw-copy.sh | `bash <(wget -qO- https://dignezzz.github.io/server/ufw-copy.sh)` |
 | unlimit_server.sh | `bash <(wget -qO- https://dignezzz.github.io/server/unlimit_server.sh)` |
 
-_Last updated at 2026-09-01 00:54 MSK_
+_Last updated at 2026-09-02 09:25 MSK_
 
 ## shm
 
@@ -61,7 +62,7 @@ _Last updated at 2026-09-01 00:54 MSK_
 |-------------|---------|
 | backup.sh | `bash <(wget -qO- https://dignezzz.github.io/shm/backup/backup.sh)` |
 
-_Last updated at 2026-09-01 00:54 MSK_
+_Last updated at 2026-09-02 09:25 MSK_
 
 ## tools
 
@@ -71,7 +72,7 @@ _Last updated at 2026-09-01 00:54 MSK_
 |-------------|---------|
 | multi_checker.sh | `bash <(wget -qO- https://dignezzz.github.io/tools/multi_checker.sh)` |
 
-_Last updated at 2026-09-01 00:54 MSK_
+_Last updated at 2026-09-02 09:25 MSK_
 
 ---
 ## 📘 Additional Resources
@@ -81,4 +82,4 @@ _Last updated at 2026-09-01 00:54 MSK_
 
 - ✍️ [neonode.cc](https://neonode.cc) — блог с техническими заметками, статьями и руководствами.
 
-_Global README auto-generated at 2026-09-01 00:54 MSK_
+_Global README auto-generated at 2026-09-02 09:25 MSK_

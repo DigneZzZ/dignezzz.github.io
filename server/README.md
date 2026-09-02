@@ -22,9 +22,10 @@
 | stpush.sh | `bash <(wget -qO- https://dignezzz.github.io/server/stpush.sh)` |
 | swap.sh | `bash <(wget -qO- https://dignezzz.github.io/server/swap.sh)` |
 | sysctl_opt.sh | `bash <(wget -qO- https://dignezzz.github.io/server/sysctl_opt.sh)` |
+| tg-webproxy.sh | `bash <(wget -qO- https://dignezzz.github.io/server/tg-webproxy.sh)` |
 | trafic.sh | `bash <(wget -qO- https://dignezzz.github.io/server/trafic.sh)` |
 | ufw-check.sh | `bash <(wget -qO- https://dignezzz.github.io/server/ufw-check.sh)` |
 | ufw-copy.sh | `bash <(wget -qO- https://dignezzz.github.io/server/ufw-copy.sh)` |
 | unlimit_server.sh | `bash <(wget -qO- https://dignezzz.github.io/server/unlimit_server.sh)` |
 
-_Last updated at 2026-09-01 00:54 MSK_
+_Last updated at 2026-09-02 09:25 MSK_
