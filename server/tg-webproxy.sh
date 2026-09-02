@@ -27,6 +27,9 @@
 
 set -euo pipefail
 umask 077
+# C.UTF-8 is built into glibc >= 2.35 (Ubuntu 22.04+/Debian 12+): keeps ${var:0:1}
+# and tr multibyte-safe even when the SSH client forwards an uninstalled locale.
+export LC_ALL=C.UTF-8
 
 # ---------------------------------------------------------------- appearance
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
@@ -56,7 +59,6 @@ MON_TABLE="tgmon"                       # nftables table: inet tgmon (traffic co
 
 RELAY_ADMIN="http://127.0.0.1:8081"     # /healthz /readyz /metrics
 
-SELF="$0"
 HAS_TTY=""   # set by probe_tty()
 
 # ---------------------------------------------------------------- tty helpers
@@ -244,10 +246,8 @@ do_install() {
 			local od; od="$(cd "$ownsite" 2>/dev/null && pwd -P)" || die "Каталог не найден: $ownsite"
 			[[ -f "$od/index.html" ]] || die "В каталоге нет index.html: $od"
 			SITE_ARG=(--site-dir "$od"); ok "Использую ваш сайт: $od"
-			return_site_done=1
-		fi
-		mkdir -p "$SITE_STAGE"
-		if [[ -z "${return_site_done:-}" ]]; then
+		else
+			mkdir -p "$SITE_STAGE"
 			generate_site "$SITE_STAGE" "$HOSTNAME"
 			SITE_ARG=(--site-dir "$SITE_STAGE")
 			ok "Сгенерирован уникальный стартовый сайт (рандомизирован под этот сервер)."
@@ -271,10 +271,14 @@ do_install() {
 
 	# --- run upstream installer ----------------------------------------
 	head2 "8) Сборка и установка (Caddy, MTProxy, relay, systemd)"
-	# Remove any stale AD_TAG drop-in first: upstream rewrites mtproxy.env
-	# without MTPROXY_TAG and restarts mtproxy, which would break on a
-	# drop-in that still references the now-unset ${MTPROXY_TAG}.
-	if [[ -f "$ADTAG_DROPIN" ]]; then rm -f "$ADTAG_DROPIN"; systemctl daemon-reload 2>/dev/null || true; fi
+	# Remove BOTH our drop-ins first: upstream rewrites mtproxy.env with only
+	# MTPROXY_SECRET and restarts mtproxy. A drop-in still referencing
+	# ${MTPROXY_SECRET2..}/${MTPROXY_TAG} would expand them to "" (systemd treats
+	# unknown ${VAR} as empty) and MTProxy exits on -S "" -> readyz never comes up
+	# -> upstream install fails. sync_mtproxy rewrites the drop-in afterwards.
+	if [[ -f "$ADTAG_DROPIN" || -f "$MT_DROPIN" ]]; then
+		rm -f "$ADTAG_DROPIN" "$MT_DROPIN"; systemctl daemon-reload 2>/dev/null || true
+	fi
 	msg "Запускаю официальный deploy/install.sh — сборка Go и MTProxy, это займёт пару минут…"
 	# Feed the secret via stdin so it never lands in the process list / ps.
 	if ! ( cd "$REPO_DIR" && ./deploy/install.sh \
@@ -366,6 +370,8 @@ check_ports() {
 
 fetch_repo() {
 	local ref="${TGWP_REF:-}"
+	[[ -z "$ref" || "$ref" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ ]] \
+		|| die "TGWP_REF должен быть коммитом/тегом/веткой (без ведущего '-')."
 	if [[ -d "$REPO_DIR/.git" ]]; then
 		git -C "$REPO_DIR" fetch --depth 1 origin >/dev/null 2>&1 || true
 		git -C "$REPO_DIR" reset --hard origin/HEAD >/dev/null 2>&1 \
@@ -478,11 +484,13 @@ verify_mtproxy_secrets() { # <profile_list>
 	want="$(set -- $1; echo $#)"
 	got="$(systemctl show -p ExecStart mtproxy.service 2>/dev/null \
 		| tr ' ' '\n' | grep -c -- '^-S$' || true)"
-	if [[ "$got" == "$want" ]]; then
-		ok "MTProxy принял $got секрет(ов) — все ссылки рабочие."
-	else
+	if [[ "$got" != "$want" ]]; then
 		warn "MTProxy принял $got секрет(ов), а профилей $want — часть ссылок может не подключаться."
 		msg  "Проверьте: systemctl show -p ExecStart mtproxy.service"
+	elif systemctl is-active --quiet mtproxy.service; then
+		ok "MTProxy запущен и принял $got секрет(ов)."
+	else
+		warn "MTProxy сконфигурирован на $got секрет(ов), но служба не активна — journalctl -u mtproxy -n 50"
 	fi
 }
 
@@ -807,6 +815,8 @@ generate_site() { # <dir> <hostname>
 	echo ".${cls}-prose h1{font-size:$((herofs - 6))px;margin:0 0 16px}"
 	echo ".${cls}-prose p{color:var(--mut)}"
 	echo ".${cls}-foot{border-top:1px solid rgba(0,0,0,.08);padding:24px 0;color:var(--mut);font-size:$((base - 2))px}"
+	echo ".${cls}-foot a{color:var(--mut);text-decoration:none}"
+	echo ".${cls}-foot a:hover{color:var(--a)}"
 	} > "$dir/styles.css"
 
 	# ---- favicon.svg (also answers /favicon.ico) --------------------------
@@ -830,7 +840,7 @@ EOF
 	local header="<header class=\"${cls}-head\"><div class=\"${cls}-wrap ${cls}-top\">${brandmark}${nav}</div></header>"
 	local rights footer
 	rights="$(pick "Все права защищены." "Все права защищены" "")"
-	footer="<footer class=\"${cls}-foot\"><div class=\"${cls}-wrap\">© ${year} ${name}. ${rights}</div></footer>"
+	footer="<footer class=\"${cls}-foot\"><div class=\"${cls}-wrap ${cls}-top\"><span>© ${year} ${name}. ${rights}</span><a href=\"/privacy\">$(pick "Приватность" "Политика приватности" "Конфиденциальность")</a></div></footer>"
 
 	local cards="" used=" "
 	for ((i = 0; i < ncards; i++)); do
@@ -873,7 +883,7 @@ EOF
 		echo "<p>${name} — $(pick "независимая команда специалистов" "небольшая инженерная студия" \
 			"частная технологическая компания" "команда практиков"). ${tagline}. $(pick "Работаем" "На рынке" "Ведём проекты") с ${founded} года.</p>"
 		echo "<p>$(about_line)</p>"
-		[[ "$pg" == "privacy" || $(rnd 3) -eq 0 ]] && echo "<p>$(privacy_line)</p>"
+		[[ $(rnd 3) -eq 0 ]] && echo "<p>$(privacy_line)</p>"
 		echo "</section>"
 		[[ $(rnd 2) -eq 0 ]] && echo "<section class=\"${cls}-grid\">${cards}</section>"
 		echo "</main>"
@@ -882,7 +892,7 @@ EOF
 		} > "$dir/${pg}.html"
 	done
 
-	# ---- privacy is always present (linked from footer-less pages too) ----
+	# ---- privacy is always present (linked from the footer) ---------------
 	if [[ ! -f "$dir/privacy.html" ]]; then
 		{
 		emit_head "Политика приватности — ${name}" "Как ${name} обрабатывает данные."
@@ -1061,8 +1071,9 @@ EOF
 verify_mtproxy_secrets(){ local want got
 	want="$(set -- $1; echo $#)"
 	got="$(systemctl show -p ExecStart mtproxy.service 2>/dev/null | tr ' ' '\n' | grep -c -- '^-S$')"
-	[[ "$got" == "$want" ]] && ok "MTProxy принял $got секрет(ов)." \
-		|| warn "MTProxy принял $got секрет(ов), профилей $want — часть ссылок может не работать."; }
+	if [[ "$got" != "$want" ]]; then warn "MTProxy принял $got секрет(ов), профилей $want — часть ссылок может не работать."
+	elif systemctl is-active --quiet mtproxy.service; then ok "MTProxy запущен и принял $got секрет(ов)."
+	else warn "MTProxy сконфигурирован, но служба не активна — journalctl -u mtproxy -n 50"; fi; }
 
 
 # ---------------------------------------------------------------- SSH allowlist
@@ -1076,9 +1087,14 @@ verify_mtproxy_secrets(){ local want got
 # Own table `inet tgfilter` (never touches upstream's tproxy_backend or tgmon),
 # policy accept with surgical DROPs so a bad list cannot lock you out of
 # everything, and DROP rather than REJECT (a timeout reads as a dead IP).
+ssh_ports(){ # every port sshd listens on — ssh-port.sh may have moved it off 22
+	local p; p="$(ss -Htlnp 2>/dev/null | awk '/"sshd"/{sub(/.*:/,"",$4); print $4}' | sort -un | paste -sd, -)"
+	[[ -z "$p" ]] && p="$(sshd -T 2>/dev/null | awk '$1=="port"{print $2}' | sort -un | paste -sd, -)"
+	printf '%s' "${p:-22}"; }
 do_geo(){
 	need_root geo
-	echo -e "${YELLOW}${BOLD}Ограничение доступа к SSH (порт 22)${NC}\n"
+	local ports; ports="$(ssh_ports)"
+	echo -e "${YELLOW}${BOLD}Ограничение доступа к SSH (порт(ы): ${ports})${NC}\n"
 	warn "Порты 80/443 НЕ ограничиваются и не должны: домен обязан выглядеть обычным сайтом."
 	msg  "Почему не гео-фильтр на 443:"
 	msg  "  • ломается выпуск/продление Let's Encrypt (проверка идёт с нескольких стран);"
@@ -1088,11 +1104,13 @@ do_geo(){
 	msg  "  • домен и так опубликован в Certificate Transparency."
 	echo
 
-	local cur="${SSH_CLIENT%% *}"; [[ -z "$cur" ]] && cur="${SSH_CONNECTION%% *}"
+	local cur="${SSH_CLIENT:-}"; cur="${cur%% *}"
+	[[ -z "$cur" ]] && { cur="${SSH_CONNECTION:-}"; cur="${cur%% *}"; }
+	cur="${cur#::ffff:}"
 	[[ -n "$cur" ]] && msg "Ваш текущий SSH-адрес: ${GREEN}${cur}${NC}"
 
 	local input
-	if [[ $# -ge 1 ]]; then input="$*"
+	if [[ $# -ge 1 ]]; then input="$(IFS=,; echo "$*")"
 	elif [[ -e /dev/tty ]] && read -r -p "Разрешить SSH с (IP/CIDR через запятую, код страны вида ru, или 'off'): " input </dev/tty; then :
 	else err "Нужен терминал или аргумент: tgwebproxy geo <ip/cidr[,...]|<cc>|off>"; exit 1; fi
 	input="$(echo "$input" | tr 'A-Z' 'a-z' | tr -d '[:space:]')"
@@ -1104,22 +1122,26 @@ do_geo(){
 		ok "Ограничение SSH снято."; return 0
 	fi
 
-	local v4="" v6="" item tmp
+	local v4="" v6="" item tmp fam url n list
 	local -a items; IFS=',' read -r -a items <<< "$input"
 	for item in "${items[@]}"; do
 		[[ -z "$item" ]] && continue
 		if [[ "$item" =~ ^[a-z]{2}$ ]]; then
-			msg "Загружаю список сетей страны '$item'…"
-			tmp="$(mktemp)"
-			if curl -fsS --max-time 30 --proto '=https' \
-				"https://raw.githubusercontent.com/ipverse/country-ip-blocks/master/country/${item}/ipv4-aggregated.txt" \
-				-o "$tmp" 2>/dev/null; then
-				local n; n="$(grep -Ecx '([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}' "$tmp" || true)"
-				if [[ "$n" -lt 32 ]]; then err "Список '$item' подозрительно мал ($n) — пропускаю."; rm -f "$tmp"; continue; fi
-				v4+="${v4:+, }$(grep -Ex '([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}' "$tmp" | paste -sd, -)"
-				msg "  добавлено $n сетей"
-			else err "Не удалось скачать список для '$item'."; fi
-			rm -f "$tmp"
+			msg "Загружаю списки сетей страны '$item' (IPv4 + IPv6)…"
+			for fam in 4 6; do
+				url="https://raw.githubusercontent.com/ipverse/country-ip-blocks/master/country/${item}/ipv${fam}-aggregated.txt"
+				tmp="$(mktemp)"
+				if ! curl -fsS --max-time 30 --proto '=https' "$url" -o "$tmp" 2>/dev/null; then
+					err "Не удалось скачать IPv${fam}-список для '$item'."; rm -f "$tmp"; continue
+				fi
+				if [[ $fam == 4 ]]; then list="$(grep -Ex '([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}' "$tmp" | paste -sd, -)"
+				else list="$(grep -Ex '[0-9a-f:]+/[0-9]{1,3}' "$tmp" | paste -sd, -)"; fi
+				rm -f "$tmp"
+				n="$(tr ',' '\n' <<< "$list" | grep -c . || true)"
+				if [[ "$n" -lt 8 ]]; then err "IPv${fam}-список '$item' подозрительно мал ($n) — пропускаю."; continue; fi
+				if [[ $fam == 4 ]]; then v4+="${v4:+, }$list"; else v6+="${v6:+, }$list"; fi
+				msg "  IPv${fam}: добавлено $n сетей"
+			done
 		elif [[ "$item" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}(/[0-9]{1,2})?$ ]]; then
 			[[ "$item" == */* ]] || item="${item}/32"
 			v4+="${v4:+, }${item}"
@@ -1131,6 +1153,11 @@ do_geo(){
 		fi
 	done
 	[[ -z "$v4$v6" ]] && { err "Не набралось ни одной валидной сети — ничего не меняю."; exit 1; }
+	# Never lock the operator out: the address this session came from is always allowed.
+	if [[ "$cur" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then v4+="${v4:+, }${cur}/32"; msg "Ваш адрес ${cur} добавлен в список."
+	elif [[ "$cur" == *:* ]]; then v6+="${v6:+, }${cur}/128"; msg "Ваш адрес ${cur} добавлен в список."; fi
+	[[ -z "$v6" ]] && warn "IPv6-адресов в списке нет — SSH по IPv6 будет закрыт полностью."
+	[[ -z "$v4" ]] && warn "IPv4-адресов в списке нет — SSH по IPv4 будет закрыт полностью."
 
 	mkdir -p /etc/tgwp
 	{
@@ -1144,9 +1171,12 @@ do_geo(){
 	echo "		type filter hook input priority -5; policy accept;"
 	echo "		iif lo accept"
 	echo "		ct state established,related accept"
-	# emit a family rule ONLY when its set exists, or an empty set drops everything
-	[[ -n "$v4" ]] && echo "		tcp dport 22 ct state new ip saddr != @admin4 counter drop"
-	[[ -n "$v6" ]] && echo "		tcp dport 22 ct state new ip6 saddr != @admin6 counter drop"
+	# allowlist per family; a family with no allowed addresses is closed entirely
+	# (otherwise an IPv4-only list would leave SSH over IPv6 open to the world)
+	if [[ -n "$v4" ]]; then echo "		tcp dport { $ports } ct state new ip saddr != @admin4 counter drop"
+	else echo "		tcp dport { $ports } ct state new meta nfproto ipv4 counter drop"; fi
+	if [[ -n "$v6" ]]; then echo "		tcp dport { $ports } ct state new ip6 saddr != @admin6 counter drop"
+	else echo "		tcp dport { $ports } ct state new meta nfproto ipv6 counter drop"; fi
 	echo "		# 80/443 deliberately untouched"
 	echo "	}"
 	echo "}"
@@ -1177,7 +1207,7 @@ WantedBy=multi-user.target
 EOF
 	systemctl daemon-reload
 	systemctl enable --now tgwp-geo.service >/dev/null 2>&1 || { err "Не удалось применить."; exit 1; }
-	ok "SSH ограничен. Правила переживут перезагрузку."
+	ok "SSH ограничен (порты: ${ports}). Правила переживут перезагрузку."
 	[[ -n "$cur" ]] && msg "Проверьте НОВЫМ соединением, не закрывая текущее: ssh ${cur} → должно работать."
 	warn "Если потеряете доступ — снять через консоль провайдера: nft delete table inet tgfilter"
 }
@@ -1339,7 +1369,11 @@ do_update(){
 		|| { err "Нет ${REPO_DIR}/deploy/update-relay.sh"; exit 1; }
 	msg "Обновляю репозиторий и relay (с авто-откатом при неудаче)…"
 	git -C "$REPO_DIR" pull --ff-only 2>/dev/null || warn "git pull не удался — собираю текущую версию."
-	( cd "$REPO_DIR" && ./deploy/update-relay.sh ) && ok "Relay обновлён." || err "Обновление не удалось (откат выполнен автоматически)."
+	if ( cd "$REPO_DIR" && ./deploy/update-relay.sh ); then
+		local ref; ref="$(git -C "$REPO_DIR" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+		sed -i "s|^REPO_REF=.*|REPO_REF=\"$ref\"|" "$INFO_FILE" 2>/dev/null || true
+		ok "Relay обновлён (коммит $ref)."
+	else err "Обновление не удалось (откат выполнен автоматически)."; fi
 }
 
 do_adtag(){
@@ -1515,7 +1549,7 @@ main() {
 			echo "Env для non-interactive установки:"
 			echo "  TGWP_HOSTNAME TGWP_EMAIL TGWP_SECRET TGWP_MODE TGWP_ADTAG"
 			echo "  TGWP_WORKERS TGWP_MAXCONN TGWP_SITE_DIR TGWP_REF TGWP_YES=1" ;;
-		*) die "Неизвестная команда '$cmd'. Справка: $SELF help" ;;
+		*) die "Неизвестная команда '$cmd'. Справка: аргумент help" ;;
 	esac
 }
 
