@@ -28,7 +28,7 @@
 set -euo pipefail
 umask 077
 
-TGWP_VERSION="1.1.0"   # bump on every change: `tgwebproxy version` / self-update compare it
+TGWP_VERSION="1.1.1"   # bump on every change: `tgwebproxy version` / self-update compare it
 # C.UTF-8 is built into glibc >= 2.35 (Ubuntu 22.04+/Debian 12+): keeps ${var:0:1}
 # and tr multibyte-safe even when the SSH client forwards an uninstalled locale.
 export LC_ALL=C.UTF-8
@@ -260,12 +260,15 @@ do_install() {
 	probe_tty
 	check_self_version
 
-	local PREV_SECRET PREV_ADTAG
+	# Everything a previous install recorded becomes the Enter-default below.
+	local PREV_SECRET PREV_ADTAG PREV_HOST PREV_EMAIL PREV_MODE
 	PREV_SECRET="$(prev_field SECRET)"; PREV_ADTAG="$(prev_field ADTAG)"
+	PREV_HOST="$(prev_field HOSTNAME)"; PREV_EMAIL="$(prev_field EMAIL)"; PREV_MODE="$(prev_field MODE)"
 
 	if [[ -f "$INFO_FILE" ]]; then
-		warn "Похоже, WEB-прокси уже установлен ($INFO_FILE)."
-		msg  "Переустановка перезапишет config/Caddyfile (сайт в /srv/tproxy-site сохранится)."
+		warn "Похоже, WEB-прокси уже установлен: ${PREV_HOST:-?}, режим ${PREV_MODE:-https}, от $(prev_field INSTALLED_AT)."
+		msg  "Прошлые значения подставлены по умолчанию (Enter = оставить). Переустановка перезапишет"
+		msg  "config/Caddyfile, сайт в /srv/tproxy-site сохранится."
 		confirm "Продолжить переустановку?" || { msg "Отменено. Управление: ${GREEN}tgwebproxy${NC}"; exit 1; }
 	fi
 
@@ -282,9 +285,10 @@ do_install() {
 	# --- inputs ---------------------------------------------------------
 	head2 "2) Домен и почта"
 	msg "Нужен отдельный домен с A-записью → ${PUBIP:-IP этого сервера}; он остаётся обычным сайтом."
-	local HOSTNAME EMAIL
+	local HOSTNAME EMAIL hint
+	if [[ -n "$PREV_HOST" ]]; then hint=" [Enter = $PREV_HOST]"; else hint=" (например proxy.example.com)"; fi
 	while :; do
-		ask HOSTNAME "Домен (например proxy.example.com): " "" "${TGWP_HOSTNAME:-}" || true
+		ask HOSTNAME "Домен${hint}: " "$PREV_HOST" "${TGWP_HOSTNAME:-}" || true
 		HOSTNAME="$(echo "$HOSTNAME" | tr 'A-Z' 'a-z' | tr -d '[:space:]')"
 		if [[ "$HOSTNAME" =~ ^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$ && "$HOSTNAME" == *.* ]]; then
 			check_dns "$HOSTNAME" "$PUBIP" && break      # A record matches (or accepted)
@@ -295,7 +299,8 @@ do_install() {
 		[[ -z "$HAS_TTY" ]] && die "Нет терминала — задайте корректную переменную TGWP_HOSTNAME."
 	done
 	while :; do
-		ask EMAIL "E-mail для Let's Encrypt (ACME): " "" "${TGWP_EMAIL:-}" || true
+		ask EMAIL "E-mail для Let's Encrypt (ACME)${PREV_EMAIL:+ [Enter = $PREV_EMAIL]}: " \
+			"$PREV_EMAIL" "${TGWP_EMAIL:-}" || true
 		[[ "$EMAIL" =~ ^[A-Za-z0-9._+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]] && break
 		err "Нужен корректный e-mail."
 		[[ -n "${TGWP_EMAIL:-}" ]] && exit 2
@@ -328,8 +333,8 @@ do_install() {
 	echo -e "  ${BOLD}websocket-lanes${NC}— отдельный WebSocket на поток. Медиа не блокирует чат, больше соединений."
 	echo -e "  ${BOLD}all${NC}            — создать все четыре сразу (4 секрета, 4 ссылки — выбор на стороне юзера)."
 	local MODE
-	ask MODE "Режим [https/https-lanes/websocket/websocket-lanes/all] (Enter = https): " \
-		"https" "${TGWP_MODE:-}" || true
+	ask MODE "Режим [https/https-lanes/websocket/websocket-lanes/all] (Enter = ${PREV_MODE:-https}): " \
+		"${PREV_MODE:-https}" "${TGWP_MODE:-}" || true
 	MODE="$(echo "$MODE" | tr 'A-Z' 'a-z' | tr -d '[:space:]')"
 	case "$MODE" in
 		https|https-lanes|websocket|websocket-lanes|all) ;;
