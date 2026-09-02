@@ -14,7 +14,7 @@
 # Usage:
 #   bash <(wget -qO- https://dignezzz.github.io/server/tg-webproxy.sh)          # interactive install
 #   bash <(wget -qO- https://dignezzz.github.io/server/tg-webproxy.sh) status   # requires prior install
-#   ... status | watch | link | mode | logs | restart | update | adtag | uninstall | help
+#   ... status | watch | link | mode | logs | restart | update | adtag | uninstall | version | self-update | help
 #
 # Non-interactive install (env overrides): TGWP_HOSTNAME, TGWP_EMAIL,
 #   TGWP_SECRET (32 hex or dd+32hex; empty = auto/keep), TGWP_ADTAG (32 hex),
@@ -27,6 +27,8 @@
 
 set -euo pipefail
 umask 077
+
+TGWP_VERSION="1.1.0"   # bump on every change: `tgwebproxy version` / self-update compare it
 # C.UTF-8 is built into glibc >= 2.35 (Ubuntu 22.04+/Debian 12+): keeps ${var:0:1}
 # and tr multibyte-safe even when the SSH client forwards an uninstalled locale.
 export LC_ALL=C.UTF-8
@@ -51,6 +53,13 @@ INFO_FILE="${STATE_DIR}/info.env"
 SITE_STAGE="${STATE_DIR}/site"
 MGMT="/usr/local/bin/tgwebproxy"
 LOG="/var/log/tgwebproxy-install.log"   # full apt/make/go/installer output
+# Where the published script lives. Version checks read the first 4 KB of each
+# and take the HIGHEST version found (jsDelivr/Pages may lag behind raw GitHub).
+SCRIPT_URLS=(
+	"https://dignezzz.github.io/server/tg-webproxy.sh"
+	"https://raw.githubusercontent.com/DigneZzZ/dignezzz.github.io/main/server/tg-webproxy.sh"
+	"https://cdn.jsdelivr.net/gh/DigneZzZ/dignezzz.github.io@main/server/tg-webproxy.sh"
+)
 
 MTENV="/etc/mtproxy/mtproxy.env"
 ADTAG_DROPIN="/etc/systemd/system/mtproxy.service.d/adtag.conf"   # legacy, removed on sight
@@ -112,6 +121,29 @@ prev_field() { # prev_field <KEY>  — read a value from an existing info.env
 	sed -n "s/^$1=//p" "$INFO_FILE" 2>/dev/null | head -1 | sed 's/^"//; s/"$//'
 }
 
+# ---------------------------------------------------------------- versioning
+ver_gt() { [[ "$1" != "$2" && "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -n1)" == "$1" ]]; }
+remote_version() { # -> "version url" of the newest published copy (reads 4 KB per source)
+	local u v best="" best_url=""
+	for u in "${SCRIPT_URLS[@]}"; do
+		v="$(curl -fsSL --max-time 4 -r 0-4095 "$u" 2>/dev/null \
+			| grep -m1 -E '^TGWP_VERSION="[0-9]+(\.[0-9]+)*"' | cut -d'"' -f2 || true)"
+		[[ -n "$v" ]] || continue
+		if [[ -z "$best" ]] || ver_gt "$v" "$best"; then best="$v"; best_url="$u"; fi
+	done
+	[[ -n "$best" ]] && printf '%s %s\n' "$best" "$best_url"
+}
+check_self_version() { # one warning if a newer script is published; never blocks the install
+	[[ "${TGWP_NO_UPDATE_CHECK:-}" == "1" ]] && return 0
+	local r rv; r="$(remote_version || true)"; [[ -n "$r" ]] || return 0
+	rv="${r%% *}"
+	if ver_gt "$rv" "$TGWP_VERSION"; then
+		warn "Вы запускаете версию $TGWP_VERSION, опубликована $rv. Лучше перезапустить установщик:"
+		msg  "  bash <(wget -qO- ${SCRIPT_URLS[0]})"
+	fi
+	return 0
+}
+
 # ---------------------------------------------------------------- logged steps
 # Long/noisy commands (apt, make, go, upstream installer) write to $LOG; the
 # terminal gets ONE live line: spinner, step label, detected phase, elapsed.
@@ -153,8 +185,38 @@ install_phase() { # last log line -> human phase ("" = keep the previous one)
 	esac
 }
 
+# upstream install-mtproxy.sh builds MTProxy with `runuser -u mtproxy -- make`
+# while install.sh holds umask 077. runuser keeps that umask, so objs/ comes out
+# 0700; after upstream's `chown -R root:root` the mtproxy service user cannot
+# even traverse objs/ -> systemd "203/EXEC" on every fresh install, and a
+# re-install keeps the bad binary (root sees it as executable, build skipped).
+# A PATH shim resets the umask for that build only; upstream files stay intact.
+make_runuser_shim() {
+	local real; real="$(command -v runuser 2>/dev/null || true)"
+	[[ -n "$real" && "$real" != "$STATE_DIR/shim/runuser" ]] || return 0
+	mkdir -p "$STATE_DIR/shim"
+	printf '#!/usr/bin/env bash\n# tg-webproxy.sh shim: build MTProxy with a sane umask (see make_runuser_shim)\numask 022\nexec %q "$@"\n' \
+		"$real" > "$STATE_DIR/shim/runuser"
+	chmod 0755 "$STATE_DIR/shim/runuser"
+}
+mtproxy_exec_failed() { # did mtproxy.service die with 203/EXEC?
+	systemctl is-failed --quiet mtproxy.service 2>/dev/null \
+		&& journalctl -u mtproxy.service -n 30 --no-pager 2>/dev/null | grep -q '203/EXEC'
+}
+repair_mtproxy_exec() { # fix the 0700 objs/ tree, restart MTProxy, wait for the relay to see it
+	[[ -f /opt/MTProxy/objs/bin/mtproto-proxy ]] || return 1
+	chmod -R a+rX /opt/MTProxy 2>/dev/null || true
+	systemctl reset-failed mtproxy.service 2>/dev/null || true
+	systemctl restart mtproxy.service 2>/dev/null || return 1
+	local i; for i in 1 2 3 4 5 6 7 8 9 10; do
+		curl -fsS --max-time 2 "$RELAY_ADMIN/readyz" >/dev/null 2>&1 && return 0; sleep 1
+	done
+	return 1
+}
+
 upstream_install() { # <host> <email> <workers> <maxconn> [--site-dir DIR]
 	local h="$1" e="$2" w="$3" c="$4"; shift 4
+	export PATH="${STATE_DIR}/shim:${PATH}"     # runuser shim, see make_runuser_shim
 	cd "$REPO_DIR" && ./deploy/install.sh --hostname "$h" --email "$e" "$@" \
 		--mtproxy-workers "$w" --mtproxy-max-connections "$c"
 }
@@ -164,6 +226,9 @@ report_install_failure() {
 	if grep -q -- '--- FAIL' "$LOG"; then
 		msg "Причина: упали unit-тесты апстрима (go test ./...):"
 		grep -E -- '--- FAIL|_test\.go:[0-9]+:' "$LOG" | tail -n 6 | sed 's/^/    /'
+	elif journalctl -u mtproxy.service -n 30 --no-pager 2>/dev/null | grep -q '203/EXEC'; then
+		msg "Причина: systemd не может запустить /opt/MTProxy/objs/bin/mtproto-proxy от пользователя mtproxy (203/EXEC — нет прав)."
+		msg "Исправление: chmod -R a+rX /opt/MTProxy && systemctl restart mtproxy && curl -fsS $RELAY_ADMIN/readyz"
 	elif grep -q 'did not become ready' "$LOG"; then
 		msg "Причина: relay не ответил на /readyz — не поднялся tproxy-server или MTProxy:"
 		journalctl -u tproxy-server -u mtproxy --no-pager -n 12 2>/dev/null | sed 's/^/    /' || true
@@ -190,9 +255,10 @@ require_root_arch() {
 #  INSTALL
 # =====================================================================
 do_install() {
-	head2 "🚀 Telegram WEB Proxy — установка (tproxy-server + MTProxy + Caddy)"
+	head2 "🚀 Telegram WEB Proxy v$TGWP_VERSION — установка (tproxy-server + MTProxy + Caddy)"
 	require_root_arch
 	probe_tty
+	check_self_version
 
 	local PREV_SECRET PREV_ADTAG
 	PREV_SECRET="$(prev_field SECRET)"; PREV_ADTAG="$(prev_field ADTAG)"
@@ -278,6 +344,7 @@ do_install() {
 	echo -e "  /newproxy → адрес ${GREEN}${HOSTNAME}:443${NC} → секрет ${GREEN}${SECRET#dd}${NC} → бот вернёт тег (32 hex)"
 	warn "Для WEB-прокси показ спонсорского канала не гарантирован (подробности: tgwebproxy adtag)."
 	local ADTAG="${TGWP_ADTAG:-$PREV_ADTAG}"
+	[[ -z "${TGWP_ADTAG:-}" && -n "$ADTAG" ]] && msg "AD_TAG из прошлой установки: $ADTAG (сменить/убрать потом: tgwebproxy adtag)"
 	if [[ -z "$ADTAG" && -n "$HAS_TTY" ]]; then
 		if confirm "Указать AD_TAG сейчас?"; then
 			ask ADTAG "AD_TAG (32 hex, /newproxy у @MTProxybot): " "" "" || true
@@ -353,12 +420,20 @@ do_install() {
 	# into 0400, so that single test fails on EVERY fresh install (tproxy-server
 	# 52a5feb, 2026-08-24). Skip exactly that test; go build ignores unknown flags.
 	export GOFLAGS='-skip=TestLoadAcceptsSystemdCredentialReadPermissions'
+	# Re-install: a binary built by an earlier run may still be 0700 root (see make_runuser_shim)
+	[[ -d /opt/MTProxy/objs ]] && { chmod -R a+rX /opt/MTProxy 2>/dev/null || true; }
+	make_runuser_shim
 	RUN_STDIN="$SECRET"     # the secret goes in via stdin: never in argv / ps
 	if ! run_logged "Сборка и установка" install_phase \
 			upstream_install "$HOSTNAME" "$EMAIL" "$WORKERS" "$MAXCONN" "${SITE_ARG[@]}"; then
 		RUN_STDIN=""; unset GOFLAGS
-		report_install_failure
-		exit 1
+		if mtproxy_exec_failed && repair_mtproxy_exec; then
+			warn "MTProxy был собран без прав на исполнение для пользователя mtproxy (203/EXEC, баг апстрима) —"
+			warn "права исправлены, служба перезапущена, relay готов. Продолжаю установку."
+		else
+			report_install_failure
+			exit 1
+		fi
 	fi
 	RUN_STDIN=""; unset GOFLAGS
 
@@ -1052,7 +1127,7 @@ print_result() { # <hostname> <secret> <adtag> <profile_list>
 	echo -e "  без path-scoped правил, request_body max_size и h3, таймауты не снижать; никакого CDN перед доменом;"
 	echo -e "  не объединяйте несколько таких доменов в один сертификат (CT свяжет их публично)."
 	echo
-	echo -e "${BLUE}${BOLD}Управление:${NC} ${GREEN}tgwebproxy${NC} status | watch | link | mode | geo | adtag | update | uninstall | help"
+	echo -e "${BLUE}${BOLD}Управление:${NC} ${GREEN}tgwebproxy${NC} status | watch | link | mode | geo | adtag | update | self-update | uninstall | help"
 	msg "Проверка: ${GREEN}curl -fsS $RELAY_ADMIN/readyz${NC} → ready; ${GREEN}curl -fsS https://$host/${NC}"
 }
 
@@ -1060,7 +1135,9 @@ print_result() { # <hostname> <secret> <adtag> <profile_list>
 #  MANAGEMENT CLI  (installed to /usr/local/bin/tgwebproxy)
 # =====================================================================
 install_mgmt_cli() {
-	cat > "$MGMT" <<'UTILITY_EOF'
+	# Temp file + mv: bash reads scripts incrementally, so rewriting a RUNNING
+	# tgwebproxy in place (self-update) would feed it garbage mid-execution.
+	cat > "$MGMT.tmp" <<'UTILITY_EOF'
 #!/usr/bin/env bash
 set -uo pipefail
 
@@ -1068,6 +1145,9 @@ RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 BLUE='\033[0;34m'; CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
 
 INFO_FILE="/opt/tgwebproxy/info.env"
+TGWP_VERSION="@VERSION@"                    # substituted by the installer
+SCRIPT_URLS=(@URLS@)                        # GitHub Pages, raw GitHub, jsDelivr
+VER_CACHE="/opt/tgwebproxy/version-check"   # "epoch version url", refreshed daily in background
 MTENV="/etc/mtproxy/mtproxy.env"
 ADTAG_DROPIN="/etc/systemd/system/mtproxy.service.d/adtag.conf"   # legacy, removed on sight
 MT_DROPIN="/etc/systemd/system/mtproxy.service.d/tgwp.conf"      # the ONLY ExecStart override
@@ -1143,6 +1223,51 @@ verify_mtproxy_secrets(){ local want got
 	elif systemctl is-active --quiet mtproxy.service; then ok "MTProxy запущен и принял $got секрет(ов)."
 	else warn "MTProxy сконфигурирован, но служба не активна — journalctl -u mtproxy -n 50"; fi; }
 
+
+# ---------------------------------------------------------------- versioning
+ver_gt(){ [[ "$1" != "$2" && "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -n1)" == "$1" ]]; }
+remote_version(){ # -> "version url" of the newest published copy (reads 4 KB per source)
+	local u v best="" best_url=""
+	for u in "${SCRIPT_URLS[@]}"; do
+		v="$(curl -fsSL --max-time 4 -r 0-4095 "$u" 2>/dev/null | grep -m1 -E '^TGWP_VERSION="[0-9]+(\.[0-9]+)*"' | cut -d'"' -f2)"
+		[[ -n "$v" ]] || continue
+		if [[ -z "$best" ]] || ver_gt "$v" "$best"; then best="$v"; best_url="$u"; fi
+	done
+	[[ -n "$best" ]] && printf '%s %s\n' "$best" "$best_url"; }
+update_notice(){ # never blocks: one line from the daily cache, refreshed in the background
+	[[ "${TGWP_NO_UPDATE_CHECK:-}" == "1" ]] && return 0
+	local now ts="" v="" u=""
+	now="$(date +%s)"
+	[[ -r "$VER_CACHE" ]] && read -r ts v u < "$VER_CACHE"
+	if [[ ! "$ts" =~ ^[0-9]+$ ]] || (( now - ts > 86400 )); then
+		( r="$(remote_version)" && printf '%s %s\n' "$now" "$r" > "$VER_CACHE.tmp" && mv -f "$VER_CACHE.tmp" "$VER_CACHE" ) >/dev/null 2>&1 &
+		disown 2>/dev/null || true
+	fi
+	[[ -n "$v" ]] && ver_gt "$v" "$TGWP_VERSION" && warn "Доступна версия $v (у вас $TGWP_VERSION): ${GREEN}tgwebproxy self-update${NC}"
+	return 0; }
+show_version(){
+	echo "tgwebproxy $TGWP_VERSION"
+	local r rv; r="$(remote_version)" || { warn "Источники обновлений недоступны (GitHub Pages, raw GitHub, jsDelivr)."; return 0; }
+	rv="${r%% *}"
+	if ver_gt "$rv" "$TGWP_VERSION"; then warn "Опубликована $rv (${r#* }) — обновить: ${GREEN}tgwebproxy self-update${NC}"
+	else ok "Это последняя версия (опубликована $rv)."; fi; }
+do_self_update(){ # re-generates this CLI from the newest published tg-webproxy.sh
+	need_root self-update
+	local r rv url tmp
+	msg "Проверяю источники: GitHub Pages, raw GitHub, jsDelivr…"
+	r="$(remote_version)" || { err "Ни один источник не ответил."; exit 1; }
+	rv="${r%% *}"; url="${r#* }"
+	if ! ver_gt "$rv" "$TGWP_VERSION" && [[ "${1:-}" != "--force" ]]; then
+		ok "Уже последняя версия ($TGWP_VERSION, опубликована $rv). Принудительно: tgwebproxy self-update --force"; return 0
+	fi
+	tmp="$(mktemp)"
+	curl -fsSL --max-time 60 "$url" -o "$tmp" || { err "Не удалось скачать $url"; rm -f "$tmp"; exit 1; }
+	if ! grep -q '^TGWP_VERSION=' "$tmp" || ! bash -n "$tmp" 2>/dev/null; then
+		err "Скачанный файл не похож на tg-webproxy.sh — ничего не меняю."; rm -f "$tmp"; exit 1
+	fi
+	if ! bash "$tmp" install-cli; then err "Установка новой утилиты не удалась."; rm -f "$tmp"; exit 1; fi
+	rm -f "$tmp" "$VER_CACHE"
+	ok "tgwebproxy обновлён: $TGWP_VERSION → $rv (источник: $url)."; }
 
 # ---------------------------------------------------------------- SSH allowlist
 # Restricting port 443 by country is a NO-GO (see `tgwebproxy geo` output):
@@ -1282,6 +1407,7 @@ EOF
 
 show_link(){
 	need_root link; load_info
+	update_notice
 	echo -e "${YELLOW}${BOLD}Ссылки подключения:${NC}"
 	local p m s
 	for p in ${PROFILES:-https:$SECRET}; do
@@ -1358,7 +1484,8 @@ do_mode(){
 
 show_status(){
 	need_root status; load_info
-	echo -e "${BLUE}${BOLD}=== Telegram WEB Proxy — статус ===${NC}\n"
+	update_notice
+	echo -e "${BLUE}${BOLD}=== Telegram WEB Proxy — статус (tgwebproxy $TGWP_VERSION) ===${NC}\n"
 	echo -e "Домен: ${GREEN}${HOSTNAME:-?}${NC}   Установлен: ${INSTALLED_AT:-?}   Коммит: ${REPO_REF:-?}"
 	echo -e "Транспорт: ${GREEN}${MODE:-https}${NC}   Профилей: ${GREEN}$(set -- ${PROFILES:-x}; echo $#)${NC}"
 
@@ -1562,7 +1689,7 @@ do_uninstall(){
 }
 
 show_help(){
-	echo -e "${BLUE}${BOLD}tgwebproxy — управление Telegram WEB Proxy${NC}\n"
+	echo -e "${BLUE}${BOLD}tgwebproxy $TGWP_VERSION — управление Telegram WEB Proxy${NC}\n"
 	echo "Команды (нужен sudo):"
 	echo -e "  ${GREEN}status${NC}         — статус служб, подключения, трафик, метрики"
 	echo -e "  ${GREEN}watch${NC}          — живой мониторинг (обновление каждые 2с)"
@@ -1574,6 +1701,8 @@ show_help(){
 	echo -e "  ${GREEN}update${NC}         — обновить relay из репозитория (с откатом)"
 	echo -e "  ${GREEN}adtag [32hex|off]${NC} — включить/сменить/убрать AD_TAG (@MTProxybot)"
 	echo -e "  ${GREEN}uninstall${NC}      — полностью удалить (--purge — с сайтом и сертификатами)"
+	echo -e "  ${GREEN}version${NC}        — версия утилиты и проверка обновлений"
+	echo -e "  ${GREEN}self-update${NC}    — обновить утилиту из опубликованного скрипта (--force — переустановить)"
 	echo -e "  ${GREEN}help${NC}           — эта справка"
 }
 
@@ -1588,11 +1717,14 @@ case "${1:-status}" in
 	update)     do_update ;;
 	adtag|tag)  shift || true; do_adtag "$@" ;;
 	uninstall)  shift || true; do_uninstall "${1:-}" ;;
+	version|-v|--version) show_version ;;
+	self-update|selfupdate) shift || true; do_self_update "${1:-}" ;;
 	help|-h|--help) show_help ;;
 	*) err "Неизвестная команда: $1"; show_help; exit 1 ;;
 esac
 UTILITY_EOF
-	chmod 0755 "$MGMT"
+	sed -i "s|@VERSION@|$TGWP_VERSION|; s|@URLS@|${SCRIPT_URLS[*]}|" "$MGMT.tmp"
+	chmod 0755 "$MGMT.tmp"; mv -f "$MGMT.tmp" "$MGMT"
 }
 
 # =====================================================================
@@ -1602,17 +1734,26 @@ main() {
 	local cmd="${1:-install}"
 	case "$cmd" in
 		install|"") do_install ;;
-		status|watch|link|links|mode|geo|logs|restart|update|adtag|tag|uninstall)
+		status|watch|link|links|mode|geo|logs|restart|update|adtag|tag|uninstall|self-update|selfupdate)
 			if [[ -x "$MGMT" ]]; then exec "$MGMT" "$@"
 			else die "WEB-прокси ещё не установлен. Сначала запустите установку без аргументов."; fi ;;
+		version|-v|--version)
+			echo "tg-webproxy.sh $TGWP_VERSION"
+			local r; r="$(remote_version || true)"
+			if [[ -z "$r" ]]; then warn "Источники обновлений недоступны."
+			elif ver_gt "${r%% *}" "$TGWP_VERSION"; then warn "Опубликована ${r%% *} (${r#* })."
+			else ok "Это последняя версия."; fi ;;
+		install-cli)   # internal: (re)generate /usr/local/bin/tgwebproxy only — used by `tgwebproxy self-update`
+			[[ $EUID -eq 0 ]] || die "Нужен root."
+			install_mgmt_cli; ok "tgwebproxy $TGWP_VERSION записан в $MGMT" ;;
 		help|-h|--help)
-			echo -e "${BLUE}${BOLD}Telegram WEB Proxy — установщик${NC}\n"
+			echo -e "${BLUE}${BOLD}Telegram WEB Proxy v$TGWP_VERSION — установщик${NC}\n"
 			echo "Использование:"
 			echo -e "  ${GREEN}bash <(wget -qO- https://dignezzz.github.io/server/tg-webproxy.sh)${NC}            — установка"
 			echo -e "  ${GREEN}bash <(wget -qO- https://dignezzz.github.io/server/tg-webproxy.sh) uninstall${NC}  — удаление"
 			echo
 			echo -e "После установки — команда ${GREEN}tgwebproxy${NC}:"
-			echo -e "  status | watch | link | mode | geo | logs | restart | update | adtag | uninstall | help"
+			echo -e "  status | watch | link | mode | geo | logs | restart | update | adtag | version | self-update | uninstall | help"
 			echo
 			echo "Env для non-interactive установки:"
 			echo "  TGWP_HOSTNAME TGWP_EMAIL TGWP_SECRET TGWP_MODE TGWP_ADTAG"
