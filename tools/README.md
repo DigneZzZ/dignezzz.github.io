@@ -4,4 +4,4 @@
 |-------------|---------|
 | multi_checker.sh | `bash <(wget -qO- https://dignezzz.github.io/tools/multi_checker.sh)` |
 
-_Last updated at 2026-09-02 18:55 MSK_
+_Last updated at 2026-09-03 00:50 MSK_
