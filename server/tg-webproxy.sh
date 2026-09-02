@@ -28,7 +28,7 @@
 set -euo pipefail
 umask 077
 
-TGWP_VERSION="1.1.1"   # bump on every change: `tgwebproxy version` / self-update compare it
+TGWP_VERSION="1.2.0"   # bump on every change: `tgwebproxy version` / self-update compare it
 # C.UTF-8 is built into glibc >= 2.35 (Ubuntu 22.04+/Debian 12+): keeps ${var:0:1}
 # and tr multibyte-safe even when the SSH client forwards an uninstalled locale.
 export LC_ALL=C.UTF-8
@@ -1132,7 +1132,7 @@ print_result() { # <hostname> <secret> <adtag> <profile_list>
 	echo -e "  без path-scoped правил, request_body max_size и h3, таймауты не снижать; никакого CDN перед доменом;"
 	echo -e "  не объединяйте несколько таких доменов в один сертификат (CT свяжет их публично)."
 	echo
-	echo -e "${BLUE}${BOLD}Управление:${NC} ${GREEN}tgwebproxy${NC} status | watch | link | mode | geo | adtag | update | self-update | uninstall | help"
+	echo -e "${BLUE}${BOLD}Управление:${NC} ${GREEN}tgwebproxy${NC} — меню с живой панелью; или status | watch | link | mode | geo | adtag | update | self-update | uninstall | help"
 	msg "Проверка: ${GREEN}curl -fsS $RELAY_ADMIN/readyz${NC} → ready; ${GREEN}curl -fsS https://$host/${NC}"
 }
 
@@ -1145,6 +1145,7 @@ install_mgmt_cli() {
 	cat > "$MGMT.tmp" <<'UTILITY_EOF'
 #!/usr/bin/env bash
 set -uo pipefail
+export LC_ALL=C.UTF-8   # ${#str} must count characters, not bytes (Cyrillic labels)
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 BLUE='\033[0;34m'; CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
@@ -1163,7 +1164,6 @@ GEO_UNIT="/etc/systemd/system/tgwp-geo.service"
 RELAY_ADMIN="http://127.0.0.1:8081"
 MTPROXY_STATS="http://127.0.0.1:8888"
 MON_TABLE="tgmon"
-SERVICES=(caddy tproxy-server mtproxy tproxy-firewall refresh-mtproxy-config.timer)
 
 msg(){ echo -e "${CYAN}$*${NC}"; }
 ok(){ echo -e "${GREEN}✅ $*${NC}"; }
@@ -1190,8 +1190,8 @@ ensure_monitor(){
 	nft list table inet "$MON_TABLE" >/dev/null 2>&1 && return 0
 	[[ -f "$MON_NFT" ]] && nft -f "$MON_NFT" >/dev/null 2>&1
 }
-metric(){ curl -fsS --max-time 4 "$RELAY_ADMIN/metrics" 2>/dev/null | awk -v n="$1" '$1==n{print $2; exit}'; }
-mtstat(){ curl -fsS --max-time 4 "$MTPROXY_STATS/stats" 2>/dev/null | awk -F'\t' -v n="$1" '$1==n{print $2; exit}'; }
+mtstat(){ curl -fsS --max-time 2 "$MTPROXY_STATS/stats" 2>/dev/null | awk -F'\t' -v n="$1" '$1==n{print $2; exit}'; }
+has_tty(){ { : </dev/tty; } 2>/dev/null && [[ -t 1 ]]; }
 conns(){ ss -Htn state established "( $1 = :$2 )" 2>/dev/null | wc -l | tr -d ' '; }
 
 # The client secret IS the MTProxy secret, so MTProxy must be started with
@@ -1239,17 +1239,23 @@ remote_version(){ # -> "version url" of the newest published copy (reads 4 KB pe
 		if [[ -z "$best" ]] || ver_gt "$v" "$best"; then best="$v"; best_url="$u"; fi
 	done
 	[[ -n "$best" ]] && printf '%s %s\n' "$best" "$best_url"; }
-update_notice(){ # never blocks: one line from the daily cache, refreshed in the background
+refresh_version_cache(){ # background, at most once a day, never blocks
 	[[ "${TGWP_NO_UPDATE_CHECK:-}" == "1" ]] && return 0
-	local now ts="" v="" u=""
-	now="$(date +%s)"
-	[[ -r "$VER_CACHE" ]] && read -r ts v u < "$VER_CACHE"
-	if [[ ! "$ts" =~ ^[0-9]+$ ]] || (( now - ts > 86400 )); then
-		( r="$(remote_version)" && printf '%s %s\n' "$now" "$r" > "$VER_CACHE.tmp" && mv -f "$VER_CACHE.tmp" "$VER_CACHE" ) >/dev/null 2>&1 &
-		disown 2>/dev/null || true
-	fi
-	[[ -n "$v" ]] && ver_gt "$v" "$TGWP_VERSION" && warn "Доступна версия $v (у вас $TGWP_VERSION): ${GREEN}tgwebproxy self-update${NC}"
+	local now ts=""; now="$(date +%s)"
+	[[ -r "$VER_CACHE" ]] && read -r ts _ < "$VER_CACHE"
+	[[ "$ts" =~ ^[0-9]+$ ]] && (( now - ts <= 86400 )) && return 0
+	[[ -e "$VER_CACHE.lock" ]] && (( now - $(stat -c %Y "$VER_CACHE.lock" 2>/dev/null || echo 0) < 120 )) && return 0
+	: > "$VER_CACHE.lock"
+	( r="$(remote_version)" && printf '%s %s\n' "$now" "$r" > "$VER_CACHE.tmp" && mv -f "$VER_CACHE.tmp" "$VER_CACHE"; rm -f "$VER_CACHE.lock" ) >/dev/null 2>&1 &
+	disown 2>/dev/null || true
 	return 0; }
+cached_newer(){ # prints the cached published version when it is newer than this CLI
+	local ts="" v="" u=""
+	[[ -r "$VER_CACHE" ]] && read -r ts v u < "$VER_CACHE"
+	[[ -n "$v" ]] && ver_gt "$v" "$TGWP_VERSION" && printf '%s' "$v"
+	return 0; }
+update_notice(){ local v; refresh_version_cache; v="$(cached_newer)"
+	[[ -n "$v" ]] && warn "Доступна версия $v (у вас $TGWP_VERSION): ${GREEN}tgwebproxy self-update${NC}"; return 0; }
 show_version(){
 	echo "tgwebproxy $TGWP_VERSION"
 	local r rv; r="$(remote_version)" || { warn "Источники обновлений недоступны (GitHub Pages, raw GitHub, jsDelivr)."; return 0; }
@@ -1487,71 +1493,113 @@ do_mode(){
 	echo; show_link
 }
 
-show_status(){
-	need_root status; load_info
-	update_notice
-	echo -e "${BLUE}${BOLD}=== Telegram WEB Proxy — статус (tgwebproxy $TGWP_VERSION) ===${NC}\n"
-	echo -e "Домен: ${GREEN}${HOSTNAME:-?}${NC}   Установлен: ${INSTALLED_AT:-?}   Коммит: ${REPO_REF:-?}"
-	echo -e "Транспорт: ${GREEN}${MODE:-https}${NC}   Профилей: ${GREEN}$(set -- ${PROFILES:-x}; echo $#)${NC}"
-
-	echo -e "\n${YELLOW}Службы:${NC}"
-	local s state
-	for s in "${SERVICES[@]}"; do
-		state="$(systemctl is-active "$s" 2>/dev/null)" || true
-		state="${state:-unknown}"
-		if [[ "$state" == active ]]; then echo -e "  ${GREEN}●${NC} $s"
-		else echo -e "  ${RED}○${NC} $s ($state)"; fi
-	done
-
-	echo -e "\n${YELLOW}Здоровье relay:${NC}"
-	if curl -fsS --max-time 4 "$RELAY_ADMIN/healthz" >/dev/null 2>&1; then echo -e "  healthz: ${GREEN}ok${NC}"
-	else echo -e "  healthz: ${RED}fail${NC}"; fi
-	if curl -fsS --max-time 4 "$RELAY_ADMIN/readyz" >/dev/null 2>&1; then echo -e "  readyz:  ${GREEN}ready${NC} (MTProxy-бэкенд доступен)"
-	else echo -e "  readyz:  ${RED}503${NC} (MTProxy-бэкенд недоступен — journalctl -u mtproxy)"; fi
-
-	echo -e "\n${YELLOW}Подключения (live):${NC}"
-	echo -e "  Клиенты → Caddy (:443):     ${GREEN}$(conns sport 443)${NC}"
-	echo -e "  Caddy → relay (:8080):      ${GREEN}$(conns sport 8080)${NC}"
-	echo -e "  relay → MTProxy (:2398):    ${GREEN}$(conns dport 2398)${NC}"
-	local mtc; mtc="$(mtstat total_special_connections)"
-	[[ -n "$mtc" ]] && echo -e "  MTProxy proxied users:      ${GREEN}$mtc${NC}"
-
-	echo -e "\n${YELLOW}Relay-метрики:${NC}"
-	local sl st bu bd sc sr df
-	sl="$(metric tproxy_sessions_live)"; st="$(metric tproxy_streams_live)"
-	sc="$(metric tproxy_sessions_created_total)"; sr="$(metric tproxy_streams_rejected_total)"
-	df="$(metric tproxy_backend_dial_failures_total)"
-	bu="$(metric tproxy_bytes_up_total)"; bd="$(metric tproxy_bytes_down_total)"
-	echo -e "  Живые сессии/стримы:        ${GREEN}${sl:-?}${NC} / ${GREEN}${st:-?}${NC}"
-	echo -e "  Всего сессий создано:       ${GREEN}${sc:-?}${NC}   отклонено стримов: ${GREEN}${sr:-0}${NC}"
-	echo -e "  Ошибки dial к бэкенду:      ${GREEN}${df:-0}${NC}"
-	[[ -n "$bu$bd" ]] && echo -e "  Трафик relay ↑/↓:           ${GREEN}$(h2h "${bu:-0}")${NC} / ${GREEN}$(h2h "${bd:-0}")${NC}"
-
-	echo -e "\n${YELLOW}Трафик HTTPS (:443, nftables-счётчики):${NC}"
-	ensure_monitor
-	local ti to; ti="$(nft_bytes tls_in)"; to="$(nft_bytes tls_out)"
-	if [[ -n "$ti$to" ]]; then
-		echo -e "  Входящий:  ${GREEN}$(h2h "${ti:-0}")${NC}   Исходящий: ${GREEN}$(h2h "${to:-0}")${NC}"
-		echo -e "  ${CYAN}(с момента создания счётчика; сбрасывается при перезагрузке/reload nftables)${NC}"
-	else warn "  Счётчики nftables недоступны."; fi
-
-	if command -v vnstat >/dev/null 2>&1; then
-		local IF; IF="$(ip -4 route show default 2>/dev/null | awk '{print $5; exit}')"
-		if [[ -n "$IF" ]]; then
-			echo -e "\n${YELLOW}Трафик интерфейса $IF (vnstat, persistent):${NC}"
-			vnstat -i "$IF" 2>/dev/null | sed 's/^/  /' | grep -E 'today|month|rx|tx|estimated' | head -8 || true
+# ---------------------------------------------------------------- dashboard
+METRICS=""     # /metrics snapshot, taken once per render
+metric_of(){ awk -v n="$1" '$1==n{print $2; exit}' <<< "$METRICS"; }
+row(){ local pad=$((13 - ${#1})); (( pad < 2 )) && pad=2; printf '  %s%*s' "$1" "$pad" ''; echo -e "$2"; }
+dot(){ # <unit> <short name> -> coloured bullet
+	local st; st="$(systemctl is-active "$1" 2>/dev/null)" || true
+	if [[ "$st" == active ]]; then printf '%s' "${GREEN}●${NC} $2"; else printf '%s' "${RED}○${NC} $2(${st:-?})"; fi; }
+short_tag(){ local t="${1:-}"; if [[ ${#t} -gt 12 ]]; then printf '%s…%s' "${t:0:8}" "${t: -4}"; else printf '%s' "$t"; fi; }
+dashboard(){ # compact one-screen status; status, watch and the menu all render this
+	local hz rz s pair t IF vn upd sl st sc sr df mtc ti to
+	METRICS="$(curl -fsS --max-time 2 "$RELAY_ADMIN/metrics" 2>/dev/null || true)"
+	if curl -fsS --max-time 2 "$RELAY_ADMIN/healthz" >/dev/null 2>&1; then hz="${GREEN}ok${NC}"; else hz="${RED}fail${NC}"; fi
+	if curl -fsS --max-time 2 "$RELAY_ADMIN/readyz"  >/dev/null 2>&1; then rz="${GREEN}ready${NC}"; else rz="${RED}503 — MTProxy недоступен${NC}"; fi
+	refresh_version_cache; upd="$(cached_newer)"
+	echo -e "${BLUE}${BOLD}Telegram WEB Proxy${NC}  ·  tgwebproxy ${TGWP_VERSION}${upd:+  ·  ${YELLOW}доступна $upd → tgwebproxy self-update${NC}}"
+	row "Домен"       "${GREEN}${HOSTNAME:-?}${NC}"
+	row "Установлен"  "${INSTALLED_AT:-?}  ·  relay ${REPO_REF:-?}"
+	row "Транспорт"   "${MODE:-https}  ·  профилей $(set -- ${PROFILES:-x}; echo $#)${ADTAG:+  ·  AD_TAG $(short_tag "$ADTAG")}"
+	s=""; for pair in caddy:caddy tproxy-server:relay mtproxy:mtproxy tproxy-firewall:firewall refresh-mtproxy-config.timer:refresh-timer; do
+		s+="$(dot "${pair%%:*}" "${pair#*:}")   "; done
+	row "Службы"      "$s"
+	sl="$(metric_of tproxy_sessions_live)"; st="$(metric_of tproxy_streams_live)"; sc="$(metric_of tproxy_sessions_created_total)"
+	sr="$(metric_of tproxy_streams_rejected_total)"; df="$(metric_of tproxy_backend_dial_failures_total)"
+	row "Relay"       "healthz $hz  ·  readyz $rz"
+	row "Сессии"      "живых ${sl:-?}  ·  стримов ${st:-?}  ·  создано ${sc:-?}  ·  отказов ${sr:-0}  ·  dial-ошибок ${df:-0}"
+	mtc="$(mtstat total_special_connections)"
+	row "Подключения" "клиенты→caddy $(conns sport 443)  ·  caddy→relay $(conns sport 8080)  ·  relay→mtproxy $(conns dport 2398)${mtc:+  ·  MTProxy users $mtc}"
+	ensure_monitor; ti="$(nft_bytes tls_in)"; to="$(nft_bytes tls_out)"
+	t="relay ↑$(h2h "$(metric_of tproxy_bytes_up_total)") ↓$(h2h "$(metric_of tproxy_bytes_down_total)")"
+	[[ -n "$ti$to" ]] && t+="  ·  :443 вход $(h2h "${ti:-0}") выход $(h2h "${to:-0}")"
+	row "Трафик"      "$t"
+	IF="$(ip -4 route show default 2>/dev/null | awk '{print $5; exit}')"
+	if [[ -n "$IF" ]] && command -v vnstat >/dev/null 2>&1; then
+		vn="$(vnstat --oneline -i "$IF" 2>/dev/null || true)"
+		if [[ "$vn" == 1\;* ]]; then
+			local drx dtx mrx mtx arx atx
+			IFS=';' read -r _ _ _ drx dtx _ _ _ mrx mtx _ _ arx atx _ <<< "$vn"
+			row "Сеть $IF"   "сегодня rx $drx tx $dtx  ·  месяц rx $mrx tx $mtx  ·  всего rx $arx tx $atx"
 		fi
 	fi
-
-	if [[ -n "${ADTAG:-}" ]]; then
-		echo -e "\n${YELLOW}AD_TAG:${NC} ${GREEN}$ADTAG${NC} (middle-proxy). Для WEB-прокси показ канала не гарантирован."
-	else echo -e "\n${YELLOW}AD_TAG:${NC} не задан. Включить: ${GREEN}tgwebproxy adtag${NC}"; fi
 }
 
-do_watch(){
-	need_root watch
-	command -v watch >/dev/null 2>&1 || { err "Утилита 'watch' не найдена (apt install procps)."; exit 1; }
-	exec watch -c -n 2 "tgwebproxy status"
+show_status(){ # [--full]
+	need_root status; load_info
+	dashboard
+	[[ "${1:-}" == "--full" || "${1:-}" == "-f" ]] || return 0
+	echo; echo -e "${YELLOW}Метрики relay:${NC}"
+	{ grep -E '^tproxy_' <<< "$METRICS" || echo "(недоступны)"; } | sed 's/^/  /'
+	local IF; IF="$(ip -4 route show default 2>/dev/null | awk '{print $5; exit}')"
+	if [[ -n "$IF" ]] && command -v vnstat >/dev/null 2>&1; then
+		echo; echo -e "${YELLOW}vnstat по месяцам ($IF):${NC}"; vnstat -m -i "$IF" 2>/dev/null | sed 's/^/  /' || true
+	fi
+	[[ -n "${ADTAG:-}" ]] && { echo; warn "AD_TAG $ADTAG: для WEB-прокси показ спонсорского канала не гарантирован."; }
+	return 0
+}
+
+do_watch(){ # live dashboard; q or Ctrl-C returns
+	need_root watch; has_tty || { err "Нужен терминал."; exit 1; }
+	local key STOP=""; trap 'STOP=1' INT
+	while [[ -z "$STOP" ]]; do
+		printf '\033[H\033[2J'; load_info; dashboard
+		printf '\n  %bq%b — выход  ·  обновление каждые 2 с ' "$BOLD" "$NC"
+		key=""; read -r -n1 -t 2 key </dev/tty 2>/dev/null || true
+		[[ "$key" == [qQ] ]] && break
+	done
+	trap - INT; echo
+}
+
+# ---------------------------------------------------------------- interactive menu
+pause(){ printf '\n  %bEnter%b — назад в меню ' "$BOLD" "$NC"; read -r _ </dev/tty 2>/dev/null || true; }
+run_sub(){ # run an action in a subshell: Ctrl-C or `exit` inside it returns to the menu
+	trap ' ' INT
+	( trap - INT; "$@" ) || true
+	trap 'printf "\n"; exit 0' INT
+}
+menu(){
+	need_root menu; has_tty || { err "Нужен терминал: используйте tgwebproxy status | link | …"; exit 1; }
+	local key a
+	trap 'printf "\n"; exit 0' INT
+	while :; do
+		load_info; printf '\033[H\033[2J'; dashboard
+		echo
+		echo -e "  ${BOLD}1${NC} Подробный статус     ${BOLD}2${NC} Живой монитор      ${BOLD}3${NC} Ссылки              ${BOLD}4${NC} Тип подключения"
+		echo -e "  ${BOLD}5${NC} AD_TAG               ${BOLD}6${NC} Доступ по SSH      ${BOLD}7${NC} Журналы             ${BOLD}8${NC} Перезапуск служб"
+		echo -e "  ${BOLD}9${NC} Обновить relay       ${BOLD}v${NC} Версия / утилита   ${BOLD}d${NC} Удалить             ${BOLD}q${NC} Выход"
+		printf '\n  Клавиша (панель обновляется каждые 5 с): '
+		key=""; read -r -n1 -t 5 key </dev/tty 2>/dev/null || { [[ -n "$key" ]] || continue; }
+		echo
+		case "$key" in
+			1) run_sub show_status --full; pause ;;
+			2) run_sub do_watch ;;
+			3) run_sub show_link; pause ;;
+			4) run_sub do_mode; pause ;;
+			5) run_sub do_adtag; pause ;;
+			6) run_sub do_geo; pause ;;
+			7) msg "Ctrl-C — вернуться в меню"; run_sub do_logs ;;
+			8) run_sub do_restart; pause ;;
+			9) run_sub do_update; pause ;;
+			v|V) run_sub show_version
+			     a=""; read -r -p "  Обновить утилиту сейчас? [y/N]: " a </dev/tty 2>/dev/null || true
+			     if [[ "$a" == [yYдД]* ]]; then
+				run_sub do_self_update; msg "Запустите tgwebproxy заново, чтобы работать в новой версии."; pause; exit 0
+			     fi ;;
+			d|D) run_sub do_uninstall; [[ -x /usr/local/bin/tgwebproxy ]] || exit 0; pause ;;
+			q|Q) echo; exit 0 ;;
+		esac
+	done
 }
 
 do_logs(){ need_root logs; journalctl -u tproxy-server -u mtproxy -u caddy -f --no-pager; }
@@ -1695,9 +1743,9 @@ do_uninstall(){
 
 show_help(){
 	echo -e "${BLUE}${BOLD}tgwebproxy $TGWP_VERSION — управление Telegram WEB Proxy${NC}\n"
-	echo "Команды (нужен sudo):"
-	echo -e "  ${GREEN}status${NC}         — статус служб, подключения, трафик, метрики"
-	echo -e "  ${GREEN}watch${NC}          — живой мониторинг (обновление каждые 2с)"
+	echo "Без аргументов — интерактивное меню с живой панелью. Команды (нужен sudo):"
+	echo -e "  ${GREEN}status [--full]${NC}— панель состояния (--full: все метрики relay и таблица vnstat)"
+	echo -e "  ${GREEN}watch${NC}          — живая панель (обновление каждые 2 с, q — выход)"
 	echo -e "  ${GREEN}link${NC}           — показать ссылки подключения"
 	echo -e "  ${GREEN}mode [режим]${NC}   — сменить тип подключения (carrier mode)"
 	echo -e "  ${GREEN}geo [ip|cc|off]${NC}— ограничить SSH по IP/стране (80/443 не трогает)"
@@ -1711,8 +1759,10 @@ show_help(){
 	echo -e "  ${GREEN}help${NC}           — эта справка"
 }
 
-case "${1:-status}" in
-	status)     show_status ;;
+case "${1:-}" in
+	"")         if has_tty; then menu; else show_status; fi ;;
+	menu)       menu ;;
+	status)     shift || true; show_status "${1:-}" ;;
 	watch)      do_watch ;;
 	link|links) show_link ;;
 	mode)       shift || true; do_mode "$@" ;;
@@ -1739,7 +1789,7 @@ main() {
 	local cmd="${1:-install}"
 	case "$cmd" in
 		install|"") do_install ;;
-		status|watch|link|links|mode|geo|logs|restart|update|adtag|tag|uninstall|self-update|selfupdate)
+		menu|status|watch|link|links|mode|geo|logs|restart|update|adtag|tag|uninstall|self-update|selfupdate)
 			if [[ -x "$MGMT" ]]; then exec "$MGMT" "$@"
 			else die "WEB-прокси ещё не установлен. Сначала запустите установку без аргументов."; fi ;;
 		version|-v|--version)
