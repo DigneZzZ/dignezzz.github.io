@@ -30,6 +30,7 @@ umask 077
 # C.UTF-8 is built into glibc >= 2.35 (Ubuntu 22.04+/Debian 12+): keeps ${var:0:1}
 # and tr multibyte-safe even when the SSH client forwards an uninstalled locale.
 export LC_ALL=C.UTF-8
+export NEEDRESTART_SUSPEND=1   # no "Scanning processes…" / service restarts from apt hooks
 
 # ---------------------------------------------------------------- appearance
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
@@ -49,6 +50,7 @@ STATE_DIR="/opt/tgwebproxy"
 INFO_FILE="${STATE_DIR}/info.env"
 SITE_STAGE="${STATE_DIR}/site"
 MGMT="/usr/local/bin/tgwebproxy"
+LOG="/var/log/tgwebproxy-install.log"   # full apt/make/go/installer output
 
 MTENV="/etc/mtproxy/mtproxy.env"
 ADTAG_DROPIN="/etc/systemd/system/mtproxy.service.d/adtag.conf"   # legacy, removed on sight
@@ -110,6 +112,73 @@ prev_field() { # prev_field <KEY>  — read a value from an existing info.env
 	sed -n "s/^$1=//p" "$INFO_FILE" 2>/dev/null | head -1 | sed 's/^"//; s/"$//'
 }
 
+# ---------------------------------------------------------------- logged steps
+# Long/noisy commands (apt, make, go, upstream installer) write to $LOG; the
+# terminal gets ONE live line: spinner, step label, detected phase, elapsed.
+RUN_STDIN=""   # fed to the wrapped command's stdin (secrets never touch argv)
+run_logged() { # <label> <phase-fn|""> <cmd...>
+	local label="$1" phasefn="$2"; shift 2
+	local start=$SECONDS rc=0 pid="" i=0 ph="" p frames='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
+	printf '\n=== %s (%s) ===\n' "$label" "$(date '+%F %T')" >> "$LOG"
+	if [[ -n "$HAS_TTY" ]]; then
+		( "$@" ) <<< "$RUN_STDIN" >> "$LOG" 2>&1 &
+		pid=$!
+		# background jobs ignore SIGINT without job control: forward Ctrl-C ourselves
+		trap 'kill "$pid" 2>/dev/null; pkill -TERM -P "$pid" 2>/dev/null; printf "\n"; exit 130' INT TERM
+		while kill -0 "$pid" 2>/dev/null; do
+			if [[ -n "$phasefn" ]]; then p="$("$phasefn")"; [[ -n "$p" ]] && ph="$p"; fi
+			printf '\r\033[K%s %s%s (%ds)' "${frames:i%10:1}" "$label" "${ph:+: $ph}" "$((SECONDS - start))"
+			i=$((i + 1)); sleep 0.5
+		done
+		wait "$pid" || rc=$?
+		trap - INT TERM
+		printf '\r\033[K'
+	else
+		( "$@" ) <<< "$RUN_STDIN" >> "$LOG" 2>&1 || rc=$?
+	fi
+	if [[ $rc -eq 0 ]]; then ok "$label — $((SECONDS - start))s"
+	else err "$label — ошибка (код $rc) через $((SECONDS - start))s"; fi
+	return $rc
+}
+
+install_phase() { # last log line -> human phase ("" = keep the previous one)
+	local l; l="$(tail -n 1 "$LOG" 2>/dev/null || true)"
+	case "$l" in
+		Installed\ for*)                          echo "готово" ;;
+		make:*|cc\ *|ar\ rcs*|rm\ -f\ objs*)      echo "сборка MTProxy (C)" ;;
+		go:\ *|ok\ *|"?"*|---\ FAIL*|FAIL*|PASS*) echo "тесты и сборка relay (Go)" ;;
+		Get:*|Hit:*|Ign:*|Unpacking*|Setting\ up*|Preparing*|Selecting*|Reading*|Building\ dep*|Processing\ trig*|Fetched*|Extracting*|\(Reading*|Solving*|Need\ to\ get*|After\ this*|The\ following*|[0-9]*\ upgraded*)
+			echo "пакеты apt" ;;
+		*) echo "" ;;
+	esac
+}
+
+upstream_install() { # <host> <email> <workers> <maxconn> [--site-dir DIR]
+	local h="$1" e="$2" w="$3" c="$4"; shift 4
+	cd "$REPO_DIR" && ./deploy/install.sh --hostname "$h" --email "$e" "$@" \
+		--mtproxy-workers "$w" --mtproxy-max-connections "$c"
+}
+
+report_install_failure() {
+	err "Официальный установщик завершился с ошибкой. Полный журнал: $LOG"
+	if grep -q -- '--- FAIL' "$LOG"; then
+		msg "Причина: упали unit-тесты апстрима (go test ./...):"
+		grep -E -- '--- FAIL|_test\.go:[0-9]+:' "$LOG" | tail -n 6 | sed 's/^/    /'
+	elif grep -q 'did not become ready' "$LOG"; then
+		msg "Причина: relay не ответил на /readyz — не поднялся tproxy-server или MTProxy:"
+		journalctl -u tproxy-server -u mtproxy --no-pager -n 12 2>/dev/null | sed 's/^/    /' || true
+	elif grep -qE '^E: |dpkg: error|Could not resolve|Failed to fetch' "$LOG"; then
+		msg "Причина: apt/сеть:"
+		grep -E '^E: |dpkg: error|Could not resolve|Failed to fetch' "$LOG" | tail -n 5 | sed 's/^/    /'
+	else
+		msg "Последние строки журнала:"; tail -n 12 "$LOG" | sed 's/^/    /'
+	fi
+	local s st=""
+	for s in caddy mtproxy tproxy-server; do st+="${st:+   }$s=$(systemctl is-active "$s" 2>/dev/null || true)"; done
+	msg "Службы: $st"
+	msg "Удалить частичную установку: ${GREEN}tgwebproxy uninstall${NC}"
+}
+
 require_root_arch() {
 	[[ $EUID -eq 0 ]] || die "Запустите от root (sudo)."
 	[[ "$(uname -m)" == "x86_64" ]] || die "Официальная сборка MTProxy требует x86_64."
@@ -134,18 +203,30 @@ do_install() {
 		confirm "Продолжить переустановку?" || { msg "Отменено. Управление: ${GREEN}tgwebproxy${NC}"; exit 1; }
 	fi
 
+	# --- prereqs + public IP: needed to validate the domain right away --
+	head2 "1) Подготовка"
+	: > "$LOG"; chmod 0600 "$LOG"
+	run_logged "Зависимости (git, curl, nftables, vnstat)" "" install_prereqs \
+		|| die "apt-get не смог установить зависимости. Журнал: $LOG"
+	local PUBIP; PUBIP="$(detect_ip)"
+	if [[ -n "$PUBIP" ]]; then msg "Внешний IPv4 этого сервера: ${GREEN}$PUBIP${NC}"
+	else warn "Не удалось определить внешний IPv4 — сверить A-запись автоматически не получится."; fi
+	check_ports
+
 	# --- inputs ---------------------------------------------------------
-	head2 "1) Домен и почта"
-	msg "Нужен ОТДЕЛЬНЫЙ домен, чьи A-запись указывает на этот сервер."
-	msg "Он остаётся обычным сайтом; Telegram-трафик прячется в HTTPS к нему."
+	head2 "2) Домен и почта"
+	msg "Нужен отдельный домен с A-записью → ${PUBIP:-IP этого сервера}; он остаётся обычным сайтом."
 	local HOSTNAME EMAIL
 	while :; do
 		ask HOSTNAME "Домен (например proxy.example.com): " "" "${TGWP_HOSTNAME:-}" || true
 		HOSTNAME="$(echo "$HOSTNAME" | tr 'A-Z' 'a-z' | tr -d '[:space:]')"
-		[[ "$HOSTNAME" =~ ^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$ && "$HOSTNAME" == *.* ]] && break
-		err "Некорректный домен. Только строчные ASCII, с точкой (домен, а не IP)."
+		if [[ "$HOSTNAME" =~ ^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$ && "$HOSTNAME" == *.* ]]; then
+			check_dns "$HOSTNAME" "$PUBIP" && break      # A record matches (or accepted)
+		else
+			err "Некорректный домен. Только строчные ASCII, с точкой (домен, а не IP)."
+		fi
 		[[ -n "${TGWP_HOSTNAME:-}" ]] && exit 2
-		[[ -z "$HAS_TTY" ]] && die "Нет терминала — задайте переменную TGWP_HOSTNAME."
+		[[ -z "$HAS_TTY" ]] && die "Нет терминала — задайте корректную переменную TGWP_HOSTNAME."
 	done
 	while :; do
 		ask EMAIL "E-mail для Let's Encrypt (ACME): " "" "${TGWP_EMAIL:-}" || true
@@ -156,7 +237,7 @@ do_install() {
 	done
 
 	# --- secret ---------------------------------------------------------
-	head2 "2) Секрет подключения"
+	head2 "3) Секрет подключения"
 	local SECRET="${TGWP_SECRET:-}"
 	if [[ -z "$SECRET" && -n "$PREV_SECRET" ]]; then
 		local keep; ask keep "Оставить текущий секрет $PREV_SECRET? [Y/n]: " "y" "" || true
@@ -173,7 +254,7 @@ do_install() {
 		|| die "Секрет должен быть 32 hex-символа (опционально с префиксом dd). Префикс ee для WEB-прокси не поддерживается."
 
 	# --- carrier mode ---------------------------------------------------
-	head2 "3) Тип подключения (carrier mode)"
+	head2 "4) Тип подключения (carrier mode)"
 	msg "Транспорт выбирается НА СЕРВЕРЕ и привязан к секрету — клиент ничего не настраивает."
 	echo -e "  ${BOLD}https${NC}          — один POST + один long-poll. Консервативный дефолт."
 	echo -e "  ${BOLD}https-lanes${NC}    — отдельная пара запросов на каждый поток. Ниже задержки, нужен HTTP/2."
@@ -192,9 +273,10 @@ do_install() {
 	ok "Режим: $MODE"
 
 	# --- ad tag ---------------------------------------------------------
-	head2 "4) Спонсорский канал (AD_TAG, необязательно)"
-	msg "Тег от @MTProxybot показывает рекламный канал подключившимся."
-	warn "Для WEB-прокси это НЕ проверено и не документировано (подробности после установки)."
+	head2 "5) Спонсорский канал (AD_TAG, необязательно)"
+	msg "Тег выдаёт @MTProxybot; работающий прокси для регистрации не нужен:"
+	echo -e "  /newproxy → адрес ${GREEN}${HOSTNAME}:443${NC} → секрет ${GREEN}${SECRET#dd}${NC} → бот вернёт тег (32 hex)"
+	warn "Для WEB-прокси показ спонсорского канала не гарантирован (подробности: tgwebproxy adtag)."
 	local ADTAG="${TGWP_ADTAG:-$PREV_ADTAG}"
 	if [[ -z "$ADTAG" && -n "$HAS_TTY" ]]; then
 		if confirm "Указать AD_TAG сейчас?"; then
@@ -210,14 +292,6 @@ do_install() {
 	WORKERS="${TGWP_WORKERS:-1}"; MAXCONN="${TGWP_MAXCONN:-4096}"
 	{ [[ "$WORKERS" =~ ^[1-9][0-9]*$ ]] && (( WORKERS <= 256 )); } || WORKERS=1
 	[[ "$MAXCONN" =~ ^[1-9][0-9]*$ ]] || MAXCONN=4096
-
-	# --- pre-flight -----------------------------------------------------
-	head2 "5) Предварительные проверки"
-	install_prereqs
-	local PUBIP; PUBIP="$(detect_ip)"
-	[[ -n "$PUBIP" ]] && msg "Внешний IPv4: ${GREEN}$PUBIP${NC}" || warn "Не удалось определить внешний IPv4."
-	check_dns "$HOSTNAME" "$PUBIP"
-	check_ports
 
 	# --- cover website --------------------------------------------------
 	head2 "6) Сайт-прикрытие"
@@ -239,7 +313,7 @@ do_install() {
 		fi
 		# Upstream deliberately ships no starter site: any widely reused template
 		# is itself an active-probe signature. Ask for a real one first.
-		msg "Лучшая маскировка — ваш НАСТОЯЩИЙ сайт. Сгенерированная заглушка — запасной вариант."
+		msg "Лучшая маскировка — ваш настоящий сайт; сгенерированная заглушка — запасной вариант."
 		local ownsite=""
 		ask ownsite "Путь к каталогу вашего сайта (Enter — сгенерировать заглушку): " "" "" || true
 		if [[ -n "$ownsite" ]]; then
@@ -250,27 +324,21 @@ do_install() {
 			mkdir -p "$SITE_STAGE"
 			generate_site "$SITE_STAGE" "$HOSTNAME"
 			SITE_ARG=(--site-dir "$SITE_STAGE")
-			ok "Сгенерирован уникальный стартовый сайт (рандомизирован под этот сервер)."
-			warn "Это ЗАГЛУШКА. Она уникальна на каждой установке, но остаётся 5-страничной"
-			warn "визиткой. Для серьёзной маскировки замените её настоящим сайтом:"
-			msg  "  отредактируйте /srv/tproxy-site и выполните: systemctl restart tproxy-server"
+			ok "Сгенерирована уникальная заглушка (5 страниц, рандомизирована под этот сервер)."
+			msg "Для серьёзной маскировки замените её настоящим сайтом: /srv/tproxy-site + systemctl restart tproxy-server"
 		fi
 	fi
 
-	# --- fetch upstream repo -------------------------------------------
-	head2 "7) Загрузка официального сервера tproxy-server"
+	# --- fetch upstream repo, persist metadata + CLI, run the installer ---
+	#     (info.env and the CLI go in BEFORE the build so `tgwebproxy
+	#     uninstall` works even if the installer fails partway)
+	head2 "7) Установка (tproxy-server + MTProxy + Caddy)"
 	fetch_repo
 	local REPO_REF; REPO_REF="$(git -C "$REPO_DIR" rev-parse --short HEAD 2>/dev/null || echo unknown)"
-	msg "Коммит tproxy-server: ${GREEN}$REPO_REF${NC}"
-
-	# --- persist metadata + management CLI (BEFORE install, so uninstall
-	#     works even if the build fails partway) ------------------------
 	write_info "$HOSTNAME" "$SECRET" "$EMAIL" "$ADTAG" "$WORKERS" "$MAXCONN" "$PUBIP" "$REPO_REF"
 	append_profiles_info "$MODE" "https:$SECRET"
 	install_mgmt_cli
 
-	# --- run upstream installer ----------------------------------------
-	head2 "8) Сборка и установка (Caddy, MTProxy, relay, systemd)"
 	# Remove BOTH our drop-ins first: upstream rewrites mtproxy.env with only
 	# MTPROXY_SECRET and restarts mtproxy. A drop-in still referencing
 	# ${MTPROXY_SECRET2..}/${MTPROXY_TAG} would expand them to "" (systemd treats
@@ -279,17 +347,20 @@ do_install() {
 	if [[ -f "$ADTAG_DROPIN" || -f "$MT_DROPIN" ]]; then
 		rm -f "$ADTAG_DROPIN" "$MT_DROPIN"; systemctl daemon-reload 2>/dev/null || true
 	fi
-	msg "Запускаю официальный deploy/install.sh — сборка Go и MTProxy, это займёт пару минут…"
-	# Feed the secret via stdin so it never lands in the process list / ps.
-	if ! ( cd "$REPO_DIR" && ./deploy/install.sh \
-			--hostname "$HOSTNAME" --email "$EMAIL" \
-			"${SITE_ARG[@]}" \
-			--mtproxy-workers "$WORKERS" --mtproxy-max-connections "$MAXCONN" ) <<< "$SECRET"; then
-		err "Официальный установщик завершился с ошибкой."
-		msg "Журнал: journalctl -u caddy -u mtproxy -u tproxy-server --no-pager"
-		msg "Удалить частичную установку: ${GREEN}tgwebproxy uninstall${NC}"
+	msg "Коммит tproxy-server: ${GREEN}$REPO_REF${NC}. Сборка Go и MTProxy занимает несколько минут; полный вывод: $LOG"
+	# GOFLAGS: upstream install.sh runs `go test ./...` under its own umask 077,
+	# which turns the 0444 fixture of TestLoadAcceptsSystemdCredentialReadPermissions
+	# into 0400, so that single test fails on EVERY fresh install (tproxy-server
+	# 52a5feb, 2026-08-24). Skip exactly that test; go build ignores unknown flags.
+	export GOFLAGS='-skip=TestLoadAcceptsSystemdCredentialReadPermissions'
+	RUN_STDIN="$SECRET"     # the secret goes in via stdin: never in argv / ps
+	if ! run_logged "Сборка и установка" install_phase \
+			upstream_install "$HOSTNAME" "$EMAIL" "$WORKERS" "$MAXCONN" "${SITE_ARG[@]}"; then
+		RUN_STDIN=""; unset GOFLAGS
+		report_install_failure
 		exit 1
 	fi
+	RUN_STDIN=""; unset GOFLAGS
 
 	# --- harden Caddy's always-on error logger (capability leak) --------
 	harden_caddy_log "$HOSTNAME" "$EMAIL" || true
@@ -297,7 +368,7 @@ do_install() {
 	# --- carrier mode / profiles ----------------------------------------
 	PROFILE_LIST="https:$SECRET"
 	if [[ "$MODE" != "https" ]]; then
-		head2 "9) Применение типа подключения ($MODE)"
+		head2 "8) Применение типа подключения ($MODE)"
 		if configure_modes "$SECRET" "$MODE"; then
 			ok "Профили применены: ${PROFILE_LIST// /, }"
 		else
@@ -310,7 +381,7 @@ do_install() {
 	# --- MTProxy secrets (+ optional AD_TAG) ----------------------------
 	# Must run for EVERY install: MTProxy has to know every client secret,
 	# and upstream install.sh has just rewritten mtproxy.env from scratch.
-	head2 "10) Синхронизация MTProxy (секреты${ADTAG:+ + AD_TAG})"
+	head2 "9) Синхронизация MTProxy (секреты${ADTAG:+ + AD_TAG})"
 	sync_mtproxy "$ADTAG" "$PUBIP" "$PROFILE_LIST" || ADTAG=""
 	systemctl restart tproxy-server.service
 	verify_mtproxy_secrets "$PROFILE_LIST"
@@ -332,31 +403,42 @@ install_prereqs() {
 	systemctl enable --now vnstat >/dev/null 2>&1 || true
 }
 
-check_dns() { # <hostname> <pubip>
-	local host="$1" pubip="$2" resolved=""
-	resolved="$(getent ahostsv4 "$host" 2>/dev/null | awk 'NR==1{print $1}' || true)"
-	if [[ -z "$resolved" ]]; then
-		warn "Домен $host сейчас не резолвится. ACME (Let's Encrypt) не сможет выдать сертификат."
-		confirm "Продолжить всё равно (A-запись добавите/подождёте)?" || die "Добавьте A-запись $host → ${pubip:-<IP сервера>} и повторите."
-	elif [[ -n "$pubip" && "$resolved" != "$pubip" ]]; then
-		warn "A-запись $host → $resolved, но внешний IP сервера $pubip."
-		# A CDN in front is structurally incompatible: the relay accepts
-		# X-Forwarded-For only when it parses as EXACTLY ONE address, the CDN
-		# terminates TLS and therefore sees the capability and bearer tokens in
-		# cleartext, and since 2025-06-09 major RU carriers throttle
-		# Cloudflare-proxied traffic to the first ~16 KB.
-		local hdrs=""
-		hdrs="$(curl -sSI --max-time 8 "https://$host/" 2>/dev/null \
-			| grep -iE 'cf-ray|cf-cache|x-cache|x-served-by|^via:|fastly|akamai' || true)"
-		if [[ -n "$hdrs" ]]; then
-			err "Перед доменом обнаружен CDN/обратный прокси:"
-			echo "$hdrs" | sed 's/^/    /'
-			die "CDN несовместим с WEB-прокси: он терминирует TLS (видит capability), ломает учёт X-Forwarded-For, а операторы РФ режут Cloudflare-трафик после ~16 КБ. Отключите проксирование (серое облако в Cloudflare) и повторите."
-		fi
-		confirm "Продолжить?" || die "Исправьте A-запись и повторите."
-	else
-		ok "DNS: $host → ${resolved:-?}"
+check_dns() { # <hostname> <pubip>  -> 0 = A record matches (or accepted), 1 = ask for another domain
+	local host="$1" pubip="$2" ips=""
+	ips="$(getent ahostsv4 "$host" 2>/dev/null | awk '{print $1}' | sort -u | paste -sd, - || true)"
+	if [[ -z "$ips" ]]; then
+		warn "Домен $host не резолвится. Нужна A-запись: ${BOLD}$host → ${pubip:-<IP сервера>}${NC}"
+		msg  "Без неё Let's Encrypt не выдаст сертификат (можно добавить запись позже и продолжить)."
+		confirm "Продолжить с этим доменом всё равно?" && return 0
+		return 1
 	fi
+	if [[ -z "$pubip" ]]; then
+		warn "A-запись $host → $ips; внешний IP сервера определить не удалось, сверьте вручную."
+		confirm "Это адрес ЭТОГО сервера?" && return 0
+		return 1
+	fi
+	if [[ ",$ips," == *",$pubip,"* ]]; then
+		ok "DNS: $host → $ips (совпадает с IP сервера)"
+		return 0
+	fi
+	warn "A-запись $host → ${RED}$ips${NC}, а этот сервер — ${GREEN}$pubip${NC}: домен привязан к другому адресу."
+	# A CDN in front is structurally incompatible: the relay accepts
+	# X-Forwarded-For only when it parses as EXACTLY ONE address, the CDN
+	# terminates TLS and therefore sees the capability and bearer tokens in
+	# cleartext, and since 2025-06-09 major RU carriers throttle
+	# Cloudflare-proxied traffic to the first ~16 KB.
+	local hdrs=""
+	hdrs="$(curl -sSI --max-time 8 "https://$host/" 2>/dev/null \
+		| grep -iE 'cf-ray|cf-cache|x-cache|x-served-by|^via:|fastly|akamai' || true)"
+	if [[ -n "$hdrs" ]]; then
+		err "Перед доменом стоит CDN/обратный прокси (терминирует TLS, ломает X-Forwarded-For, режется операторами РФ):"
+		echo "$hdrs" | sed 's/^/    /'
+		msg "Отключите проксирование (серое облако в Cloudflare) или введите другой домен."
+		return 1
+	fi
+	msg "Исправьте A-запись на $pubip или введите другой домен."
+	confirm "Продолжить с этим доменом всё равно?" && return 0
+	return 1
 }
 
 check_ports() {
@@ -966,25 +1048,11 @@ print_result() { # <hostname> <secret> <adtag> <profile_list>
 		msg  "Подробности и ограничения: tgwebproxy adtag"
 	fi
 	echo
-	echo -e "${YELLOW}${BOLD}Не трогайте на этом домене (иначе маскировка ломается):${NC}"
-	echo -e "  • никаких ${BOLD}file_server / root / handle_path / redir / respond${NC} в Caddyfile —"
-	echo -e "    file_server отдаёт ETag/Accept-Ranges, relay не отдаёт; один ETag выдаёт два сервера;"
-	echo -e "  • никакого ${BOLD}request_body max_size${NC} на весь хост (граница 413 ищется за пару запросов);"
-	echo -e "  • ничего path-scoped (match на /api/v1/* или /);"
-	echo -e "  • не добавляйте ${BOLD}h3${NC} к protocols и не снижайте read_body(60s)/response_header_timeout(40s);"
-	echo -e "  • не ставьте CDN/Cloudflare перед доменом — ломает учёт IP и режется операторами РФ;"
-	echo -e "  • не кладите несколько таких доменов в один сертификат (CT свяжет их публично)."
+	echo -e "${YELLOW}${BOLD}Не трогайте на этом домене${NC} (иначе маскировка ломается): Caddyfile без file_server/root/redir/respond,"
+	echo -e "  без path-scoped правил, request_body max_size и h3, таймауты не снижать; никакого CDN перед доменом;"
+	echo -e "  не объединяйте несколько таких доменов в один сертификат (CT свяжет их публично)."
 	echo
-	echo -e "${BLUE}${BOLD}Управление:${NC}"
-	echo -e "  ${GREEN}tgwebproxy status${NC}   — статус, подключения, трафик"
-	echo -e "  ${GREEN}tgwebproxy watch${NC}    — живой мониторинг"
-	echo -e "  ${GREEN}tgwebproxy link${NC}     — снова показать ссылки"
-	echo -e "  ${GREEN}tgwebproxy mode${NC}     — сменить тип подключения (carrier mode)"
-	echo -e "  ${GREEN}tgwebproxy geo${NC}      — ограничить SSH по IP/стране (80/443 не трогает)"
-	echo -e "  ${GREEN}tgwebproxy adtag${NC}    — включить/сменить/убрать AD_TAG"
-	echo -e "  ${GREEN}tgwebproxy update${NC}   — обновить relay из репозитория"
-	echo -e "  ${GREEN}tgwebproxy uninstall${NC}— полностью удалить"
-	echo
+	echo -e "${BLUE}${BOLD}Управление:${NC} ${GREEN}tgwebproxy${NC} status | watch | link | mode | geo | adtag | update | uninstall | help"
 	msg "Проверка: ${GREEN}curl -fsS $RELAY_ADMIN/readyz${NC} → ready; ${GREEN}curl -fsS https://$host/${NC}"
 }
 
@@ -1379,12 +1447,12 @@ do_update(){
 do_adtag(){
 	need_root adtag; load_info
 	echo -e "${YELLOW}${BOLD}AD_TAG — спонсорский канал${NC}\n"
-	warn "Стек WEB-прокси не тестирует и не документирует показ спонсорского канала."
-	warn "MTProxy видит все подключения с 127.0.0.1 (relay) — атрибуция по IP теряется."
-	warn "Зарегистрировать WEB-домен у @MTProxybot НЕЛЬЗЯ: он проверяет публичный host:port"
-	warn "сырого MTProto, а здесь :2398 закрыт фаерволом. Тег применяется 'вслепую'."
+	warn "Для WEB-прокси показ спонсорского канала не гарантирован: MTProxy видит клиентов как 127.0.0.1 (relay),"
+	warn "атрибуция по IP теряется, а стек апстрима это не тестирует."
 	echo
-	msg "Как получить тег: @MTProxybot → /newproxy → (host:port, secret) → тег (32 hex)."
+	local bsec="${SECRET:-}"; bsec="${bsec#dd}"
+	msg "Как получить тег (работающий прокси не нужен): @MTProxybot → /newproxy →"
+	msg "  адрес ${GREEN}${HOSTNAME:-<домен>}:443${NC} → секрет ${GREEN}${bsec}${NC} → тег (32 hex)."
 	echo
 	local cur="${ADTAG:-}"; [[ -n "$cur" ]] && msg "Текущий AD_TAG: $cur"
 
