@@ -14,10 +14,11 @@
 # Usage:
 #   bash <(wget -qO- https://dignezzz.github.io/server/tg-webproxy.sh)          # interactive install
 #   bash <(wget -qO- https://dignezzz.github.io/server/tg-webproxy.sh) status   # requires prior install
-#   ... status | watch | link | logs | restart | update | adtag | uninstall | help
+#   ... status | watch | link | mode | logs | restart | update | adtag | uninstall | help
 #
 # Non-interactive install (env overrides): TGWP_HOSTNAME, TGWP_EMAIL,
 #   TGWP_SECRET (32 hex or dd+32hex; empty = auto/keep), TGWP_ADTAG (32 hex),
+#   TGWP_MODE (https|https-lanes|websocket|websocket-lanes|all),
 #   TGWP_WORKERS, TGWP_MAXCONN, TGWP_SITE_DIR (own site), TGWP_REF (pin repo commit),
 #   TGWP_YES=1 (auto-confirm all prompts).
 #
@@ -47,7 +48,8 @@ SITE_STAGE="${STATE_DIR}/site"
 MGMT="/usr/local/bin/tgwebproxy"
 
 MTENV="/etc/mtproxy/mtproxy.env"
-ADTAG_DROPIN="/etc/systemd/system/mtproxy.service.d/adtag.conf"
+ADTAG_DROPIN="/etc/systemd/system/mtproxy.service.d/adtag.conf"   # legacy, removed on sight
+MT_DROPIN="/etc/systemd/system/mtproxy.service.d/tgwp.conf"      # the ONLY ExecStart override
 MON_NFT="/etc/tproxy-server/tgmon.nft"
 MON_UNIT="/etc/systemd/system/tgmon-counters.service"
 MON_TABLE="tgmon"                       # nftables table: inet tgmon (traffic counters)
@@ -168,8 +170,27 @@ do_install() {
 	[[ "$SECRET" =~ ^([0-9a-f]{32}|dd[0-9a-f]{32})$ ]] \
 		|| die "Секрет должен быть 32 hex-символа (опционально с префиксом dd). Префикс ee для WEB-прокси не поддерживается."
 
+	# --- carrier mode ---------------------------------------------------
+	head2 "3) Тип подключения (carrier mode)"
+	msg "Транспорт выбирается НА СЕРВЕРЕ и привязан к секрету — клиент ничего не настраивает."
+	echo -e "  ${BOLD}https${NC}          — один POST + один long-poll. Консервативный дефолт."
+	echo -e "  ${BOLD}https-lanes${NC}    — отдельная пара запросов на каждый поток. Ниже задержки, нужен HTTP/2."
+	echo -e "  ${BOLD}websocket${NC}      — один WebSocket на все потоки. Быстрее всего, общий TCP-затор."
+	echo -e "  ${BOLD}websocket-lanes${NC}— отдельный WebSocket на поток. Медиа не блокирует чат, больше соединений."
+	echo -e "  ${BOLD}all${NC}            — создать все четыре сразу (4 секрета, 4 ссылки — выбор на стороне юзера)."
+	local MODE
+	ask MODE "Режим [https/https-lanes/websocket/websocket-lanes/all] (Enter = https): " \
+		"https" "${TGWP_MODE:-}" || true
+	MODE="$(echo "$MODE" | tr 'A-Z' 'a-z' | tr -d '[:space:]')"
+	case "$MODE" in
+		https|https-lanes|websocket|websocket-lanes|all) ;;
+		"") MODE="https" ;;
+		*) warn "Неизвестный режим '$MODE' — использую https."; MODE="https" ;;
+	esac
+	ok "Режим: $MODE"
+
 	# --- ad tag ---------------------------------------------------------
-	head2 "3) Спонсорский канал (AD_TAG, необязательно)"
+	head2 "4) Спонсорский канал (AD_TAG, необязательно)"
 	msg "Тег от @MTProxybot показывает рекламный канал подключившимся."
 	warn "Для WEB-прокси это НЕ проверено и не документировано (подробности после установки)."
 	local ADTAG="${TGWP_ADTAG:-$PREV_ADTAG}"
@@ -189,7 +210,7 @@ do_install() {
 	[[ "$MAXCONN" =~ ^[1-9][0-9]*$ ]] || MAXCONN=4096
 
 	# --- pre-flight -----------------------------------------------------
-	head2 "4) Предварительные проверки"
+	head2 "5) Предварительные проверки"
 	install_prereqs
 	local PUBIP; PUBIP="$(detect_ip)"
 	[[ -n "$PUBIP" ]] && msg "Внешний IPv4: ${GREEN}$PUBIP${NC}" || warn "Не удалось определить внешний IPv4."
@@ -197,7 +218,7 @@ do_install() {
 	check_ports
 
 	# --- cover website --------------------------------------------------
-	head2 "5) Сайт-прикрытие"
+	head2 "6) Сайт-прикрытие"
 	local SITE_ARG=()
 	if [[ -n "${TGWP_SITE_DIR:-}" ]]; then
 		local sd; sd="$(cd "${TGWP_SITE_DIR}" 2>/dev/null && pwd -P)" || die "TGWP_SITE_DIR не существует: ${TGWP_SITE_DIR}"
@@ -214,16 +235,30 @@ do_install() {
 		if [[ -d /srv/tproxy-site && -n "$(find /srv/tproxy-site -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]]; then
 			die "/srv/tproxy-site не пуст, но без index.html. Уберите каталог или добавьте index.html."
 		fi
+		# Upstream deliberately ships no starter site: any widely reused template
+		# is itself an active-probe signature. Ask for a real one first.
+		msg "Лучшая маскировка — ваш НАСТОЯЩИЙ сайт. Сгенерированная заглушка — запасной вариант."
+		local ownsite=""
+		ask ownsite "Путь к каталогу вашего сайта (Enter — сгенерировать заглушку): " "" "" || true
+		if [[ -n "$ownsite" ]]; then
+			local od; od="$(cd "$ownsite" 2>/dev/null && pwd -P)" || die "Каталог не найден: $ownsite"
+			[[ -f "$od/index.html" ]] || die "В каталоге нет index.html: $od"
+			SITE_ARG=(--site-dir "$od"); ok "Использую ваш сайт: $od"
+			return_site_done=1
+		fi
 		mkdir -p "$SITE_STAGE"
-		generate_site "$SITE_STAGE" "$HOSTNAME"
-		SITE_ARG=(--site-dir "$SITE_STAGE")
-		ok "Сгенерирован уникальный стартовый сайт (рандомизирован под этот сервер)."
-		warn "Это ЗАГЛУШКА. Для реальной маскировки замените её своим настоящим сайтом:"
-		msg  "  отредактируйте файлы в /srv/tproxy-site и выполните: systemctl restart tproxy-server"
+		if [[ -z "${return_site_done:-}" ]]; then
+			generate_site "$SITE_STAGE" "$HOSTNAME"
+			SITE_ARG=(--site-dir "$SITE_STAGE")
+			ok "Сгенерирован уникальный стартовый сайт (рандомизирован под этот сервер)."
+			warn "Это ЗАГЛУШКА. Она уникальна на каждой установке, но остаётся 5-страничной"
+			warn "визиткой. Для серьёзной маскировки замените её настоящим сайтом:"
+			msg  "  отредактируйте /srv/tproxy-site и выполните: systemctl restart tproxy-server"
+		fi
 	fi
 
 	# --- fetch upstream repo -------------------------------------------
-	head2 "6) Загрузка официального сервера tproxy-server"
+	head2 "7) Загрузка официального сервера tproxy-server"
 	fetch_repo
 	local REPO_REF; REPO_REF="$(git -C "$REPO_DIR" rev-parse --short HEAD 2>/dev/null || echo unknown)"
 	msg "Коммит tproxy-server: ${GREEN}$REPO_REF${NC}"
@@ -231,10 +266,11 @@ do_install() {
 	# --- persist metadata + management CLI (BEFORE install, so uninstall
 	#     works even if the build fails partway) ------------------------
 	write_info "$HOSTNAME" "$SECRET" "$EMAIL" "$ADTAG" "$WORKERS" "$MAXCONN" "$PUBIP" "$REPO_REF"
+	append_profiles_info "$MODE" "https:$SECRET"
 	install_mgmt_cli
 
 	# --- run upstream installer ----------------------------------------
-	head2 "7) Сборка и установка (Caddy, MTProxy, relay, systemd)"
+	head2 "8) Сборка и установка (Caddy, MTProxy, relay, systemd)"
 	# Remove any stale AD_TAG drop-in first: upstream rewrites mtproxy.env
 	# without MTPROXY_TAG and restarts mtproxy, which would break on a
 	# drop-in that still references the now-unset ${MTPROXY_TAG}.
@@ -251,17 +287,35 @@ do_install() {
 		exit 1
 	fi
 
-	# --- optional AD_TAG ------------------------------------------------
-	if [[ -n "$ADTAG" ]]; then
-		head2 "8) Применение AD_TAG"
-		apply_adtag "$ADTAG" "$PUBIP" || ADTAG=""   # rolled back on failure
+	# --- harden Caddy's always-on error logger (capability leak) --------
+	harden_caddy_log "$HOSTNAME" "$EMAIL" || true
+
+	# --- carrier mode / profiles ----------------------------------------
+	PROFILE_LIST="https:$SECRET"
+	if [[ "$MODE" != "https" ]]; then
+		head2 "9) Применение типа подключения ($MODE)"
+		if configure_modes "$SECRET" "$MODE"; then
+			ok "Профили применены: ${PROFILE_LIST// /, }"
+		else
+			warn "Откат на режим https."
+			MODE="https"
+		fi
 	fi
+	append_profiles_info "$MODE" "$PROFILE_LIST"
+
+	# --- MTProxy secrets (+ optional AD_TAG) ----------------------------
+	# Must run for EVERY install: MTProxy has to know every client secret,
+	# and upstream install.sh has just rewritten mtproxy.env from scratch.
+	head2 "10) Синхронизация MTProxy (секреты${ADTAG:+ + AD_TAG})"
+	sync_mtproxy "$ADTAG" "$PUBIP" "$PROFILE_LIST" || ADTAG=""
+	systemctl restart tproxy-server.service
+	verify_mtproxy_secrets "$PROFILE_LIST"
 
 	# --- monitoring counters (persistent across reboots) ---------------
 	install_monitor || warn "Не удалось настроить счётчики nftables (мониторинг трафика частично недоступен)."
 
 	ok "Утилита управления установлена: ${GREEN}tgwebproxy${NC}"
-	print_result "$HOSTNAME" "$SECRET" "$ADTAG"
+	print_result "$HOSTNAME" "$SECRET" "$ADTAG" "$PROFILE_LIST"
 }
 
 # ---------------------------------------------------------------- prereqs
@@ -281,7 +335,20 @@ check_dns() { # <hostname> <pubip>
 		warn "Домен $host сейчас не резолвится. ACME (Let's Encrypt) не сможет выдать сертификат."
 		confirm "Продолжить всё равно (A-запись добавите/подождёте)?" || die "Добавьте A-запись $host → ${pubip:-<IP сервера>} и повторите."
 	elif [[ -n "$pubip" && "$resolved" != "$pubip" ]]; then
-		warn "A-запись $host → $resolved, но внешний IP сервера $pubip. Проверьте DNS (без CDN/прокси)."
+		warn "A-запись $host → $resolved, но внешний IP сервера $pubip."
+		# A CDN in front is structurally incompatible: the relay accepts
+		# X-Forwarded-For only when it parses as EXACTLY ONE address, the CDN
+		# terminates TLS and therefore sees the capability and bearer tokens in
+		# cleartext, and since 2025-06-09 major RU carriers throttle
+		# Cloudflare-proxied traffic to the first ~16 KB.
+		local hdrs=""
+		hdrs="$(curl -sSI --max-time 8 "https://$host/" 2>/dev/null \
+			| grep -iE 'cf-ray|cf-cache|x-cache|x-served-by|^via:|fastly|akamai' || true)"
+		if [[ -n "$hdrs" ]]; then
+			err "Перед доменом обнаружен CDN/обратный прокси:"
+			echo "$hdrs" | sed 's/^/    /'
+			die "CDN несовместим с WEB-прокси: он терминирует TLS (видит capability), ломает учёт X-Forwarded-For, а операторы РФ режут Cloudflare-трафик после ~16 КБ. Отключите проксирование (серое облако в Cloudflare) и повторите."
+		fi
 		confirm "Продолжить?" || die "Исправьте A-запись и повторите."
 	else
 		ok "DNS: $host → ${resolved:-?}"
@@ -333,43 +400,201 @@ EOF
 	chmod 0600 "$INFO_FILE"
 }
 
-# ---------------------------------------------------------------- AD_TAG
-# Applies -P <tag> to the stock MTProxy via a systemd drop-in that survives
-# upstream re-installs of the base unit. Switches MTProxy to middle-proxy
-# mode; behind NAT that needs --nat-info <private>:<public>.
-apply_adtag() { # <tag> <pubip>
-	local tag="$1" pubip="$2" localip natinfo=""
-	localip="$(ip -4 route get 8.8.8.8 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}' || true)"
-	if [[ -n "$pubip" && -n "$localip" && "$localip" != "$pubip" ]]; then
-		natinfo=" --nat-info ${localip}:${pubip}"
-		msg "Обнаружен NAT ($localip за $pubip) → добавляю --nat-info."
-	fi
-	if grep -q '^MTPROXY_TAG=' "$MTENV" 2>/dev/null; then
-		sed -i "s/^MTPROXY_TAG=.*/MTPROXY_TAG=$tag/" "$MTENV"
+append_profiles_info() { # <mode> <profile_list>
+	[[ -f "$INFO_FILE" ]] || return 0
+	sed -i '/^MODE=/d; /^PROFILES=/d' "$INFO_FILE"
+	printf 'MODE="%s"\nPROFILES="%s"\n' "$1" "$2" >> "$INFO_FILE"
+}
+
+# ---------------------------------------------------------------- carrier modes
+# Rewrites /etc/tproxy-server/profiles.json when a non-default carrier mode (or
+# all four at once) was requested. Several profiles MAY share one MTProxy
+# backend: config validation (internal/config/config.go) requires a unique
+# profile NAME and a unique capability (derived from hostname+secret) — it does
+# NOT require a unique backend. A separate MTProxy listener is only needed when
+# profiles need separate quotas or routing.
+PROFILE_LIST=""      # "mode:secret mode:secret ..." — filled by configure_modes
+configure_modes() {  # <secret> <mode>
+	local secret="$1" mode="$2"
+	local pf="/etc/tproxy-server/profiles.json"
+	PROFILE_LIST="https:$secret"
+	[[ "$mode" == "https" ]] && return 0     # upstream already wrote exactly this
+
+	local json="" first=1 m s
+	if [[ "$mode" == "all" ]]; then
+		PROFILE_LIST=""
+		for m in https https-lanes websocket websocket-lanes; do
+			if [[ "$m" == "https" ]]; then s="$secret"; else s="$(gen_secret)"; fi
+			PROFILE_LIST+="${PROFILE_LIST:+ }${m}:${s}"
+			[[ $first -eq 1 ]] || json+=","
+			first=0
+			json+="{\"name\":\"${m}\",\"secret\":\"${s}\",\"backend\":\"127.0.0.1:2398\",\"carrier_mode\":\"${m}\"}"
+		done
 	else
-		echo "MTPROXY_TAG=$tag" >> "$MTENV"
+		PROFILE_LIST="${mode}:${secret}"
+		json="{\"name\":\"default\",\"secret\":\"${secret}\",\"backend\":\"127.0.0.1:2398\",\"carrier_mode\":\"${mode}\"}"
 	fi
-	mkdir -p "$(dirname "$ADTAG_DROPIN")"
-	cat > "$ADTAG_DROPIN" <<EOF
+
+	printf '{"profiles":[%s]}\n' "$json" > "$pf"
+	chown root:tproxy "$pf" 2>/dev/null || true
+	chmod 0400 "$pf"
+
+	if ! /usr/local/bin/tproxy-server -config /etc/tproxy-server/config.json \
+			-profiles-file "$pf" -check >/dev/null 2>&1; then
+		err "Конфигурация профилей не прошла проверку — откатываю на один https-профиль."
+		printf '{"profiles":[{"name":"default","secret":"%s","backend":"127.0.0.1:2398"}]}\n' "$secret" > "$pf"
+		chown root:tproxy "$pf" 2>/dev/null || true
+		chmod 0400 "$pf"
+		PROFILE_LIST="https:$secret"
+		return 1
+	fi
+	return 0
+}
+
+# ---------------------------------------------------------------- MTProxy config
+# CRITICAL: the client-facing secret IS the MTProxy secret (README: "The secret
+# is the same client-facing MTProxy secret configured in the corresponding
+# server profile"). The relay never decrypts the stream, so MTProxy must be
+# started with EVERY secret the relay serves — otherwise those clients pass the
+# bridge, open a session, and die at the obfuscated handshake with no
+# diagnostics (/readyz only opens a bare TCP connection, so it still says ready).
+#
+# systemd does NOT word-split "${VAR}", so several secrets need several env
+# variables. Everything lives in ONE drop-in: two drop-ins each doing an
+# "ExecStart=" reset would clobber each other in alphabetical order.
+compute_natinfo() { # <pubip> -> " --nat-info priv:pub" or empty
+	local pubip="$1" localip
+	localip="$(ip -4 route get 8.8.8.8 2>/dev/null \
+		| awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}' || true)"
+	[[ -n "$pubip" && -n "$localip" && "$localip" != "$pubip" ]] \
+		&& printf ' --nat-info %s:%s' "$localip" "$pubip"
+	return 0
+}
+
+# Post-condition: MTProxy must carry exactly one -S per served profile,
+# otherwise some links silently fail at the obfuscated handshake.
+verify_mtproxy_secrets() { # <profile_list>
+	local want got
+	want="$(set -- $1; echo $#)"
+	got="$(systemctl show -p ExecStart mtproxy.service 2>/dev/null \
+		| tr ' ' '\n' | grep -c -- '^-S$' || true)"
+	if [[ "$got" == "$want" ]]; then
+		ok "MTProxy принял $got секрет(ов) — все ссылки рабочие."
+	else
+		warn "MTProxy принял $got секрет(ов), а профилей $want — часть ссылок может не подключаться."
+		msg  "Проверьте: systemctl show -p ExecStart mtproxy.service"
+	fi
+}
+
+secrets_of() { # <profile_list "mode:secret ...">  -> "secret secret ..."
+	local p out=""
+	for p in $1; do out+="${out:+ }${p#*:}"; done
+	printf '%s' "$out"
+}
+
+write_mtproxy_config() { # <adtag|""> <natinfo|""> <secret...>
+	local tag="$1" natinfo="$2"; shift 2
+	local i=0 s bs sflags="" tagflag=""
+
+	sed -i '/^MTPROXY_SECRET[0-9]*=/d; /^MTPROXY_TAG=/d' "$MTENV" 2>/dev/null || true
+	for s in "$@"; do
+		i=$((i + 1)); bs="$s"
+		# mirror install.sh: the dd transport marker is client-side only
+		[[ "$bs" == dd* && ${#bs} -eq 34 ]] && bs="${bs:2}"
+		if [[ $i -eq 1 ]]; then
+			printf 'MTPROXY_SECRET=%s\n' "$bs" >> "$MTENV"
+			sflags+=' -S ${MTPROXY_SECRET}'
+		else
+			printf 'MTPROXY_SECRET%d=%s\n' "$i" "$bs" >> "$MTENV"
+			sflags+=" -S \${MTPROXY_SECRET${i}}"
+		fi
+	done
+	if [[ -n "$tag" ]]; then
+		printf 'MTPROXY_TAG=%s\n' "$tag" >> "$MTENV"
+		tagflag=' -P ${MTPROXY_TAG}'
+	fi
+	chown root:mtproxy "$MTENV" 2>/dev/null || true
+	chmod 0640 "$MTENV"
+
+	mkdir -p /etc/systemd/system/mtproxy.service.d
+	rm -f "$ADTAG_DROPIN"          # retire the old single-purpose drop-in
+	cat > "$MT_DROPIN" <<EOF
 [Service]
 ExecStart=
-ExecStart=/opt/MTProxy/objs/bin/mtproto-proxy -u mtproxy -p 8888 -H 2398 -S \${MTPROXY_SECRET} -P \${MTPROXY_TAG}${natinfo} --aes-pwd /etc/mtproxy/proxy-secret /etc/mtproxy/proxy-multi.conf -M \${MTPROXY_WORKERS} -C \${MTPROXY_MAX_CONNECTIONS}
+ExecStart=/opt/MTProxy/objs/bin/mtproto-proxy -u mtproxy -p 8888 -H 2398${sflags}${tagflag}${natinfo} --aes-pwd /etc/mtproxy/proxy-secret /etc/mtproxy/proxy-multi.conf -M \${MTPROXY_WORKERS} -C \${MTPROXY_MAX_CONNECTIONS}
 EOF
 	systemctl daemon-reload
-	# If MTProxy refuses to start with the tag, roll back instead of aborting
-	# the whole install — the proxy itself works fine without a tag.
+}
+
+# Apply secrets (+ optional ad tag) to MTProxy and restart it.
+# Falls back to secrets-only if MTProxy refuses to start with the tag.
+sync_mtproxy() { # <adtag|""> <pubip> <profile_list>
+	local tag="$1" pubip="$2" plist="$3" natinfo=""
+	local -a secrets; read -r -a secrets <<< "$(secrets_of "$plist")"
+	[[ -n "$tag" ]] && natinfo="$(compute_natinfo "$pubip")"
+	[[ -n "$natinfo" ]] && msg "Обнаружен NAT → добавляю${natinfo}."
+
+	write_mtproxy_config "$tag" "$natinfo" "${secrets[@]}"
 	if systemctl restart mtproxy.service 2>/dev/null; then
-		ok "AD_TAG применён (middle-proxy mode)."
-	else
+		[[ -n "$tag" ]] && ok "AD_TAG применён (middle-proxy mode)."
+		return 0
+	fi
+	if [[ -n "$tag" ]]; then
 		warn "MTProxy не запустился с AD_TAG — откатываю тег (прокси продолжит работать без него)."
 		msg  "Диагностика: journalctl -u mtproxy --no-pager -n 50"
-		rm -f "$ADTAG_DROPIN"
-		sed -i '/^MTPROXY_TAG=/d' "$MTENV" 2>/dev/null || true
-		systemctl daemon-reload
+		write_mtproxy_config "" "" "${secrets[@]}"
 		systemctl restart mtproxy.service || warn "MTProxy всё ещё не стартует — проверьте журнал."
 		sed -i 's|^ADTAG=.*|ADTAG=""|' "$INFO_FILE" 2>/dev/null || true
 		return 1
 	fi
+	warn "MTProxy не запустился — проверьте: journalctl -u mtproxy --no-pager -n 50"
+	return 1
+}
+
+# ---------------------------------------------------------------- Caddy log hardening
+# deploy/Caddyfile has no `log` directive, so operators assume logging is off.
+# It is not: Caddy's http.log.error logger stays active, and whenever
+# reverse_proxy cannot reach 127.0.0.1:8080 — which happens on EVERY relay
+# restart and every `tgwebproxy update` — it logs the request including
+# request>uri. Those URIs contain /?bridge=<capability>, the highest-value
+# secret in the deployment, which then lands in journald and in any log
+# shipper or support bundle. Filter the fields out of the default logger.
+harden_caddy_log() { # <hostname> <email>
+	local host="$1" email="$2" cf=/etc/caddy/Caddyfile tmp
+	[[ -f "$cf" ]] || return 1
+	grep -q 'request>uri delete' "$cf" && return 0        # already hardened
+	head -1 "$cf" | grep -qx '{' || {
+		warn "Caddyfile без глобального блока — пропускаю фильтрацию логов."; return 1; }
+
+	tmp="$(mktemp)"
+	{
+		echo '{'
+		cat <<'CADDYLOG'
+	# Added by tg-webproxy.sh: strip capability-bearing fields from the
+	# always-on error logger. Do not remove.
+	log default {
+		output stderr
+		format filter {
+			wrap console
+			request>uri delete
+			request>headers delete
+			request>remote_ip ip_mask 24 64
+		}
+	}
+CADDYLOG
+		tail -n +2 "$cf"
+	} > "$tmp"
+
+	if TPROXY_HOSTNAME="$host" TPROXY_SITE_ROOT=/srv/tproxy-site ACME_EMAIL="$email" \
+			/usr/local/bin/caddy validate --config "$tmp" --adapter caddyfile >/dev/null 2>&1; then
+		install -m 0644 "$tmp" "$cf"; rm -f "$tmp"
+		systemctl reload caddy.service 2>/dev/null || systemctl restart caddy.service 2>/dev/null || true
+		ok "Логи Caddy отфильтрованы (capability больше не попадает в journald)."
+		return 0
+	fi
+	rm -f "$tmp"
+	warn "Не удалось применить фильтр логов Caddy — проверьте /etc/caddy/Caddyfile вручную."
+	return 1
 }
 
 # ---------------------------------------------------------------- monitoring
@@ -411,96 +636,298 @@ EOF
 }
 
 # ---------------------------------------------------------------- cover site generator
-# Produces a small, RANDOMIZED static site so two installs never share a
-# fingerprint. Files are made world-readable (relay runs as user `tproxy`).
+# Produces a small, RANDOMIZED static site so two installs never share an
+# active-probe fingerprint.
+#
+# Hard constraints from the relay (internal/server/site.go), do not violate:
+#   Content-Security-Policy: default-src 'self'; style-src 'self'; img-src 'self';
+#     worker-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'
+#   => NO inline <style> blocks and NO inline style="" ATTRIBUTES (style-src 'self'
+#      has neither 'unsafe-inline' nor 'unsafe-hashes'), no inline <script>, no
+#      forms, no third-party resources.
+#   /favicon.ico is answered from favicon.svg; /404.html is the not-found page;
+#   extensionless /about resolves about.html. Files are read once at start-up.
+# Entropy per pick, not per install. A single 16-bit seed feeding bash's LCG
+# would cap the whole reachable output space at 65536 sites — enumerable.
+rnd()  { echo $(( $(od -An -N4 -tu4 /dev/urandom | tr -d ' ') % $1 )); }
+pick() { local -a a=("$@"); echo "${a[$(rnd ${#a[@]})]}"; }
+rtok() { local n="${1:-6}"; { LC_ALL=C tr -dc 'a-z' </dev/urandom | dd bs=1 count="$n" 2>/dev/null; } || true; }
+
+# NB: build every phrase through variables. A line continuation INSIDE a
+# double-quoted echo keeps the next line's leading tabs in the output.
+brand_name() {
+	local a b
+	case "$(rnd 3)" in
+	0) a="$(pick Northwind Meridian Aster Cobalt Larkspur Vireo Halcyon Ravenna \
+	             Ironwood Selene Driftwood Quantic Alder Fenwick Lowell Brightwater)"
+	   b="$(pick Labs Studio Digital Works Systems Group Media Consulting Partners Collective)" ;;
+	1) a="$(pick Северный Ясный Первый Точный Ровный Светлый Прямой Верный Открытый)"
+	   b="$(pick Контур Вектор Формат Стандарт Профиль Сегмент Ориентир Масштаб)" ;;
+	*) a="$(pick Blue Pale Deep Bright Quiet Still Amber Slate)"
+	   b="$(pick Harbor Field Ridge Vale Pine Grove Point Hollow)" ;;
+	esac
+	printf '%s %s' "$a" "$b"
+}
+
+hero_line() {
+	local a b c
+	a="$(pick "Мы помогаем командам" "Наша задача — помочь командам" \
+	          "Мы даём командам возможность" "Помогаем инженерным командам" \
+	          "Мы работаем с командами, которые хотят" "Наши клиенты выбирают нас, чтобы")"
+	b="$(pick "запускать продукты" "доводить идеи до релиза" "выпускать обновления" \
+	          "развивать сервисы" "строить инфраструктуру" "выводить проекты в продакшн")"
+	c="$(pick "быстрее и надёжнее." "без лишних рисков." "предсказуемо и в срок." \
+	          "с меньшими затратами." "и не терять качество." "не отвлекаясь на рутину.")"
+	printf '%s %s %s' "$a" "$b" "$c"
+}
+
+about_line() {
+	local a b
+	a="$(pick "Небольшая команда позволяет держать высокий уровень вовлечённости:" \
+	          "Мы сознательно остаёмся компактными:" \
+	          "Размер команды — наш осознанный выбор:" \
+	          "Мы не наращиваем штат ради роста:")"
+	b="$(pick "каждый проект ведёт постоянный инженер, а не сменяющаяся линия поддержки." \
+	          "клиент общается с теми, кто действительно пишет код." \
+	          "решения принимаются быстро, без длинных согласований." \
+	          "мы берём столько проектов, сколько можем вести внимательно.")"
+	printf '%s %s' "$a" "$b"
+}
+
+privacy_line() {
+	local a b
+	a="$(pick "Мы не передаём данные третьим лицам" "Данные не покидают наши серверы" \
+	          "Мы не продаём и не передаём информацию о клиентах" \
+	          "Сведения о клиентах не раскрываются третьим сторонам")"
+	b="$(pick "и не используем сторонние трекеры." "и не подключаем внешнюю аналитику." \
+	          "и не размещаем рекламные скрипты." "и не применяем сторонние счётчики.")"
+	printf '%s %s' "$a" "$b"
+}
+
 generate_site() { # <dir> <hostname>
 	local dir="$1" host="$2"
-	local names=("Northwind Labs" "Meridian Studio" "Aster Digital" "Blue Harbor" \
-	             "Quantic Works" "Larkspur Media" "Vireo Systems" "Orchard & Pine" \
-	             "Cobalt Field" "Selene Consulting" "Driftwood Co" "Halcyon Group")
-	local taglines=("Проектируем цифровые продукты" "Инженерия данных и облака" \
+
+	local name tagline accent bg card fg mut font year founded cls radius
+	name="$(brand_name)"
+	tagline="$(pick "Проектируем цифровые продукты" "Инженерия данных и облака" \
 	                "Дизайн, который работает" "Автоматизация для бизнеса" \
-	                "Исследования и разработка" "Инфраструктура нового поколения")
-	local accents=("#2563eb" "#0891b2" "#7c3aed" "#059669" "#dc2626" "#d97706" "#0d9488" "#4f46e5")
-	local rand; rand="$(od -An -N4 -tu4 /dev/urandom | tr -d ' ')"
-	local name="${names[$((rand % ${#names[@]}))]}"
-	local tag="${taglines[$(( (rand/7) % ${#taglines[@]}))]}"
-	local accent="${accents[$(( (rand/13) % ${#accents[@]}))]}"
-	local year; year="$(date +%Y)"
+	                "Исследования и разработка" "Инфраструктура нового поколения" \
+	                "Продуктовая аналитика и рост" "Интеграции и бэкенд-разработка" \
+	                "Надёжные системы для сложных задач")"
+	accent="$(pick "#2563eb" "#0891b2" "#7c3aed" "#059669" "#b91c1c" "#d97706" \
+	               "#0d9488" "#4f46e5" "#be185d" "#15803d" "#0369a1" "#7e22ce" "#a16207")"
+	# NB: no pure white here — cards are white and would vanish into the page
+	bg="$(pick "#f7f7f9" "#fafafa" "#f5f6f8" "#f8f9fb" "#f6f7f9" "#fbfbfc")"
+	card="$(pick "#ffffff" "#ffffff" "#fdfdfe")"
+	fg="$(pick "#16181d" "#111827" "#1f2328" "#18181b")"
+	mut="$(pick "#5c6470" "#6b7280" "#64748b" "#71717a")"
+	font="$(pick "-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif" \
+	             "Segoe UI,Roboto,Ubuntu,Cantarell,Helvetica,Arial,sans-serif" \
+	             "system-ui,-apple-system,Helvetica Neue,Arial,sans-serif" \
+	             "Georgia,Cambria,Times New Roman,serif" \
+	             "Inter,system-ui,Segoe UI,Roboto,Arial,sans-serif")"
+	radius="$(pick 4 6 8 10 12 14 16)"
+	year="$(date +%Y)"; founded=$((2009 + $(rnd 15)))
+	cls="$(pick s c u ui q lx nv kp fx mt dl)$(( $(rnd 90) + 10 ))"
 
-	cat > "$dir/styles.css" <<EOF
-:root{--a:${accent};--bg:#f7f7f9;--fg:#16181d;--mut:#5c6470}
-*{box-sizing:border-box}body{margin:0;font:16px/1.6 -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:var(--fg);background:var(--bg)}
-.wrap{max-width:880px;margin:0 auto;padding:0 20px}
-header{padding:22px 0;border-bottom:1px solid #e6e8ec}
-.brand{font-weight:700;font-size:20px;color:var(--a);text-decoration:none}
-nav a{color:var(--mut);text-decoration:none;margin-left:18px}nav a:hover{color:var(--a)}
-.hero{padding:64px 0 40px}.hero h1{font-size:40px;margin:0 0 12px}.hero p{font-size:19px;color:var(--mut);max-width:60ch}
-.btn{display:inline-block;margin-top:20px;background:var(--a);color:#fff;padding:11px 20px;border-radius:8px;text-decoration:none}
-.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:18px;padding:24px 0 56px}
-.card{background:#fff;border:1px solid #e6e8ec;border-radius:12px;padding:20px}
-.card h3{margin:0 0 8px}footer{border-top:1px solid #e6e8ec;padding:24px 0;color:var(--mut);font-size:14px}
+	local base=$((15 + $(rnd 3)))             # 15..17px
+	local lh="1.$(( 55 + $(rnd 20) ))"        # 1.55..1.74
+	local maxw=$((820 + $(rnd 9) * 20))       # 820..980
+	local gap=$((14 + $(rnd 8)))
+	local herofs=$((32 + $(rnd 12)))
+	local ncards=$((3 + $(rnd 2)))
+	local layout; layout="$(pick grid flex)"
+	local cardstyle; cardstyle="$(pick border shadow tint)"
+	local headstyle; headstyle="$(pick line block)"
+	local heroalign; heroalign="$(pick left left center)"
+
+	local -a svc_h=("Консалтинг" "Разработка" "Поддержка" "Аналитика" "Интеграции" \
+	                "Аудит" "Обучение" "Сопровождение" "Миграции" "Оптимизация")
+	local -a svc_p=(\
+	  "Аудит, стратегия и сопровождение проектов на всех этапах." \
+	  "Веб-сервисы, интеграции и надёжная инфраструктура." \
+	  "Мониторинг, обновления и оперативная помощь по будням." \
+	  "Метрики, отчётность и понятные выводы для команды." \
+	  "Связываем внутренние системы и внешние сервисы." \
+	  "Проверяем архитектуру и находим узкие места." \
+	  "Воркшопы и внутренние регламенты для ваших специалистов." \
+	  "Долгосрочная поддержка и развитие работающих систем." \
+	  "Переносим данные и сервисы без простоя." \
+	  "Ускоряем то, что уже работает, но работает медленно.")
+
+	# ---- pick 2..4 inner pages so the path set is not fixed ---------------
+	local -a poolp=(about services pricing contacts team faq careers docs)
+	local -a poolt=("О нас" "Услуги" "Цены" "Контакты" "Команда" "Вопросы" "Вакансии" "Документация")
+	local npages=$((2 + $(rnd 3))) i j pages="" titles=""
+	local -a idxs=()
+	for ((i = 0; i < npages; i++)); do
+		j=$(rnd ${#poolp[@]})
+		while [[ " ${idxs[*]:-} " == *" $j "* ]]; do j=$(( (j + 1) % ${#poolp[@]} )); done
+		idxs+=("$j"); pages+="${pages:+ }${poolp[$j]}"; titles+="${titles:+|}${poolt[$j]}"
+	done
+
+	# ---- stylesheet: vary structure, not only token values ----------------
+	{
+	echo ":root{--a:${accent};--bg:${bg};--cd:${card};--fg:${fg};--mut:${mut};--r:${radius}px}"
+	echo "*{box-sizing:border-box}"
+	echo "body{margin:0;font:${base}px/${lh} ${font};color:var(--fg);background:var(--bg)}"
+	echo ".${cls}-wrap{max-width:${maxw}px;margin:0 auto;padding:0 20px}"
+	echo ".${cls}-top{display:flex;justify-content:space-between;align-items:center;gap:16px}"
+	if [[ "$headstyle" == "line" ]]; then
+		echo ".${cls}-head{padding:22px 0;border-bottom:1px solid rgba(0,0,0,.08)}"
+	else
+		echo ".${cls}-head{padding:20px 0;background:var(--cd);box-shadow:0 1px 2px rgba(0,0,0,.06)}"
+	fi
+	echo ".${cls}-brand{display:flex;align-items:center;gap:9px;font-weight:700;font-size:$((base + 4))px;color:var(--a);text-decoration:none}"
+	echo ".${cls}-nav a{color:var(--mut);text-decoration:none;margin-left:18px}"
+	echo ".${cls}-nav a:hover{color:var(--a)}"
+	if [[ "$heroalign" == "center" ]]; then
+		echo ".${cls}-hero{padding:64px 0 40px;text-align:center}"
+		echo ".${cls}-hero p{margin:0 auto}"
+	else
+		echo ".${cls}-hero{padding:60px 0 38px}"
+	fi
+	echo ".${cls}-hero h1{font-size:${herofs}px;line-height:1.15;margin:0 0 14px}"
+	echo ".${cls}-hero p{font-size:$((base + 3))px;color:var(--mut);max-width:62ch}"
+	echo ".${cls}-btn{display:inline-block;margin-top:22px;background:var(--a);color:#fff;padding:11px 21px;border-radius:var(--r);text-decoration:none}"
+	if [[ "$layout" == "grid" ]]; then
+		echo ".${cls}-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:${gap}px;padding:20px 0 56px}"
+	else
+		echo ".${cls}-grid{display:flex;flex-wrap:wrap;gap:${gap}px;padding:20px 0 56px}"
+		echo ".${cls}-card{flex:1 1 240px}"
+	fi
+	case "$cardstyle" in
+		border) echo ".${cls}-card{background:var(--cd);border:1px solid rgba(0,0,0,.09);border-radius:var(--r);padding:21px}" ;;
+		shadow) echo ".${cls}-card{background:var(--cd);box-shadow:0 1px 3px rgba(0,0,0,.10);border-radius:var(--r);padding:22px}" ;;
+		tint)   echo ".${cls}-card{background:var(--cd);border-left:3px solid var(--a);border-radius:var(--r);padding:20px}" ;;
+	esac
+	echo ".${cls}-card h3{margin:0 0 8px;font-size:$((base + 1))px}"
+	echo ".${cls}-card p{margin:0;color:var(--mut);font-size:$((base - 1))px}"
+	echo ".${cls}-prose{padding:52px 0;max-width:66ch}"
+	echo ".${cls}-prose h1{font-size:$((herofs - 6))px;margin:0 0 16px}"
+	echo ".${cls}-prose p{color:var(--mut)}"
+	echo ".${cls}-foot{border-top:1px solid rgba(0,0,0,.08);padding:24px 0;color:var(--mut);font-size:$((base - 2))px}"
+	} > "$dir/styles.css"
+
+	# ---- favicon.svg (also answers /favicon.ico) --------------------------
+	local initial="${name:0:1}"
+	cat > "$dir/favicon.svg" <<EOF
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="${initial}">
+<rect width="64" height="64" rx="$((radius + 4))" fill="${accent}"/>
+<text x="32" y="43" font-family="Helvetica,Arial,sans-serif" font-size="34" font-weight="700"
+ text-anchor="middle" fill="#ffffff">${initial}</text></svg>
 EOF
 
-	cat > "$dir/index.html" <<EOF
-<!doctype html><html lang="ru"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>${name}</title><link rel="stylesheet" href="/styles.css"></head><body>
-<header><div class="wrap" style="display:flex;justify-content:space-between;align-items:center">
-<a class="brand" href="/">${name}</a>
-<nav><a href="/">Главная</a><a href="/about">О нас</a><a href="/privacy">Приватность</a></nav>
-</div></header>
-<main class="wrap">
-<section class="hero"><h1>${name}</h1><p>${tag}. Мы помогаем командам запускать продукты быстрее и надёжнее.</p>
-<a class="btn" href="/about">Узнать больше</a></section>
-<section class="grid">
-<div class="card"><h3>Консалтинг</h3><p>Аудит, стратегия и сопровождение проектов на всех этапах.</p></div>
-<div class="card"><h3>Разработка</h3><p>Веб-сервисы, интеграции и надёжная инфраструктура.</p></div>
-<div class="card"><h3>Поддержка</h3><p>Мониторинг, обновления и оперативная помощь 24/7.</p></div>
-</section></main>
-<footer><div class="wrap">© ${year} ${name}. Все права защищены.</div></footer>
-</body></html>
-EOF
+	# ---- shared fragments -------------------------------------------------
+	local nav="<nav class=\"${cls}-nav\"><a href=\"/\">Главная</a>"
+	i=0
+	for pg in $pages; do
+		i=$((i + 1))
+		nav+="<a href=\"/${pg}\">$(echo "$titles" | cut -d'|' -f$i)</a>"
+	done
+	nav+="</nav>"
+	local brandmark="<a class=\"${cls}-brand\" href=\"/\"><svg width=\"22\" height=\"22\" viewBox=\"0 0 64 64\" aria-hidden=\"true\"><rect width=\"64\" height=\"64\" rx=\"14\" fill=\"${accent}\"/></svg>${name}</a>"
+	local header="<header class=\"${cls}-head\"><div class=\"${cls}-wrap ${cls}-top\">${brandmark}${nav}</div></header>"
+	local rights footer
+	rights="$(pick "Все права защищены." "Все права защищены" "")"
+	footer="<footer class=\"${cls}-foot\"><div class=\"${cls}-wrap\">© ${year} ${name}. ${rights}</div></footer>"
 
-	cat > "$dir/about.html" <<EOF
-<!doctype html><html lang="ru"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>О нас — ${name}</title><link rel="stylesheet" href="/styles.css"></head><body>
-<header><div class="wrap"><a class="brand" href="/">${name}</a></div></header>
-<main class="wrap"><section class="hero"><h1>О компании</h1>
-<p>${name} — независимая команда специалистов. ${tag}. Работаем с 2019 года,
-ценим прозрачность, качество и долгосрочные отношения с клиентами.</p></section></main>
-<footer><div class="wrap">© ${year} ${name}.</div></footer></body></html>
-EOF
+	local cards="" used=" "
+	for ((i = 0; i < ncards; i++)); do
+		j=$(rnd ${#svc_h[@]})
+		while [[ "$used" == *" $j "* ]]; do j=$(( (j + 1) % ${#svc_h[@]} )); done
+		used+="$j "
+		cards+="<div class=\"${cls}-card\"><h3>${svc_h[$j]}</h3><p>${svc_p[$j]}</p></div>"
+	done
 
-	cat > "$dir/privacy.html" <<EOF
-<!doctype html><html lang="ru"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Политика приватности — ${name}</title><link rel="stylesheet" href="/styles.css"></head><body>
-<header><div class="wrap"><a class="brand" href="/">${name}</a></div></header>
-<main class="wrap"><section class="hero"><h1>Политика приватности</h1>
-<p>Мы уважаем вашу конфиденциальность и обрабатываем данные только в объёме,
-необходимом для оказания услуг. Свяжитесь с нами по вопросам обработки данных.</p></section></main>
-<footer><div class="wrap">© ${year} ${name}.</div></footer></body></html>
-EOF
+	emit_head() { # <title> <description>
+		printf '<!doctype html><html lang="ru"><head><meta charset="utf-8">\n'
+		printf '<meta name="viewport" content="width=device-width,initial-scale=1">\n'
+		printf '<meta name="description" content="%s">\n' "$2"
+		printf '<link rel="stylesheet" href="/styles.css"><link rel="icon" href="/favicon.svg" type="image/svg+xml">\n'
+		printf '<title>%s</title></head><body>\n' "$1"
+	}
 
-	cat > "$dir/404.html" <<EOF
-<!doctype html><html lang="ru"><head><meta charset="utf-8">
-<title>404 — ${name}</title><link rel="stylesheet" href="/styles.css"></head><body>
-<main class="wrap"><section class="hero"><h1>Страница не найдена</h1>
-<p>Вернитесь на <a href="/">главную</a>.</p></section></main></body></html>
-EOF
+	# ---- index ------------------------------------------------------------
+	{
+	emit_head "$name" "${tagline}. $(hero_line)"
+	echo "$header"
+	echo "<main class=\"${cls}-wrap\">"
+	echo "<section class=\"${cls}-hero\"><h1>${name}</h1><p>${tagline}. $(hero_line)</p>"
+	echo "<a class=\"${cls}-btn\" href=\"/$(echo "$pages" | cut -d' ' -f1)\">$(pick "Подробнее" "Что мы делаем" "Узнать больше" "Наши услуги")</a></section>"
+	echo "<section class=\"${cls}-grid\">${cards}</section>"
+	echo "</main>"
+	echo "$footer"
+	echo "</body></html>"
+	} > "$dir/index.html"
 
-	printf 'User-agent: *\nAllow: /\n' > "$dir/robots.txt"
+	# ---- inner pages ------------------------------------------------------
+	i=0
+	for pg in $pages; do
+		i=$((i + 1))
+		local ttl; ttl="$(echo "$titles" | cut -d'|' -f$i)"
+		{
+		emit_head "${ttl} — ${name}" "${ttl}: ${tagline}."
+		echo "$header"
+		echo "<main class=\"${cls}-wrap\"><section class=\"${cls}-prose\"><h1>${ttl}</h1>"
+		echo "<p>${name} — $(pick "независимая команда специалистов" "небольшая инженерная студия" \
+			"частная технологическая компания" "команда практиков"). ${tagline}. $(pick "Работаем" "На рынке" "Ведём проекты") с ${founded} года.</p>"
+		echo "<p>$(about_line)</p>"
+		[[ "$pg" == "privacy" || $(rnd 3) -eq 0 ]] && echo "<p>$(privacy_line)</p>"
+		echo "</section>"
+		[[ $(rnd 2) -eq 0 ]] && echo "<section class=\"${cls}-grid\">${cards}</section>"
+		echo "</main>"
+		echo "$footer"
+		echo "</body></html>"
+		} > "$dir/${pg}.html"
+	done
 
-	# Make everything readable by the relay's unprivileged user (umask is 077).
+	# ---- privacy is always present (linked from footer-less pages too) ----
+	if [[ ! -f "$dir/privacy.html" ]]; then
+		{
+		emit_head "Политика приватности — ${name}" "Как ${name} обрабатывает данные."
+		echo "$header"
+		echo "<main class=\"${cls}-wrap\"><section class=\"${cls}-prose\"><h1>Политика приватности</h1>"
+		echo "<p>Мы уважаем вашу конфиденциальность и обрабатываем данные только в объёме, необходимом для оказания услуг.</p>"
+		echo "<p>$(privacy_line)</p></section></main>"
+		echo "$footer"
+		echo "</body></html>"
+		} > "$dir/privacy.html"
+	fi
+
+	# ---- 404 ---------------------------------------------------------------
+	{
+	emit_head "$(pick "Страница не найдена" "404" "Ничего не найдено") — ${name}" "Страница не найдена."
+	echo "$header"
+	echo "<main class=\"${cls}-wrap\"><section class=\"${cls}-prose\"><h1>$(pick "Страница не найдена" "Ничего не найдено" "Такой страницы нет")</h1>"
+	echo "<p>$(pick "Возможно, ссылка устарела." "Проверьте адрес страницы." "Похоже, страница была перемещена.") Вернитесь на <a href=\"/\">главную</a>.</p>"
+	echo "</section></main>"
+	echo "$footer"
+	echo "</body></html>"
+	} > "$dir/404.html"
+
+	# ---- robots.txt: three shapes ------------------------------------------
+	case "$(rnd 3)" in
+	0) printf 'User-agent: *\nAllow: /\n' > "$dir/robots.txt" ;;
+	1) printf 'User-agent: *\nDisallow:\n\nSitemap: https://%s/sitemap.xml\n' "$host" > "$dir/robots.txt"
+	   { echo '<?xml version="1.0" encoding="UTF-8"?>'
+	     echo '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+	     echo "<url><loc>https://${host}/</loc></url>"
+	     for pg in $pages; do echo "<url><loc>https://${host}/${pg}</loc></url>"; done
+	     echo '</urlset>'; } > "$dir/sitemap.xml" ;;
+	*) printf 'User-agent: *\nCrawl-delay: %s\nDisallow: /%s\n' "$(( $(rnd 9) + 1 ))" "$(rtok 6)" > "$dir/robots.txt" ;;
+	esac
+
+	unset -f emit_head
+	# Readable by the relay's unprivileged user (script umask is 077).
 	chmod 0755 "$dir"
+	find "$dir" -type d -exec chmod 0755 {} + 2>/dev/null || true
 	find "$dir" -type f -exec chmod 0644 {} + 2>/dev/null || true
 }
 
 # ---------------------------------------------------------------- final output
-print_result() { # <hostname> <secret> <adtag>
-	local host="$1" secret="$2" adtag="$3"
+print_result() { # <hostname> <secret> <adtag> <profile_list>
+	local host="$1" secret="$2" adtag="$3" profiles="${4:-}"
 	head2 "🎉 Готово — WEB-прокси развёрнут на https://$host/"
 	echo
 	echo -e "${YELLOW}${BOLD}Данные для клиента:${NC}"
@@ -508,8 +935,13 @@ print_result() { # <hostname> <secret> <adtag>
 	echo -e "  Секрет  (Secret): ${GREEN}$secret${NC}"
 	echo
 	echo -e "${YELLOW}${BOLD}Ссылки подключения:${NC}"
-	echo -e "  ${GREEN}https://t.me/webproxy?server=$host&secret=$secret${NC}"
-	echo -e "  ${GREEN}tg://webproxy?server=$host&secret=$secret${NC}"
+	local p m s
+	for p in ${profiles:-https:$secret}; do
+		m="${p%%:*}"; s="${p#*:}"
+		echo -e "  ${BOLD}[$m]${NC}"
+		echo -e "    ${GREEN}https://t.me/webproxy?server=$host&secret=$s${NC}"
+		echo -e "    ${GREEN}tg://webproxy?server=$host&secret=$s${NC}"
+	done
 	echo
 	echo -e "${YELLOW}Как добавить вручную (самый надёжный способ):${NC}"
 	echo -e "  Telegram → Настройки → Продвинутые → Тип соединения →"
@@ -524,10 +956,21 @@ print_result() { # <hostname> <secret> <adtag>
 		msg  "Подробности и ограничения: tgwebproxy adtag"
 	fi
 	echo
+	echo -e "${YELLOW}${BOLD}Не трогайте на этом домене (иначе маскировка ломается):${NC}"
+	echo -e "  • никаких ${BOLD}file_server / root / handle_path / redir / respond${NC} в Caddyfile —"
+	echo -e "    file_server отдаёт ETag/Accept-Ranges, relay не отдаёт; один ETag выдаёт два сервера;"
+	echo -e "  • никакого ${BOLD}request_body max_size${NC} на весь хост (граница 413 ищется за пару запросов);"
+	echo -e "  • ничего path-scoped (match на /api/v1/* или /);"
+	echo -e "  • не добавляйте ${BOLD}h3${NC} к protocols и не снижайте read_body(60s)/response_header_timeout(40s);"
+	echo -e "  • не ставьте CDN/Cloudflare перед доменом — ломает учёт IP и режется операторами РФ;"
+	echo -e "  • не кладите несколько таких доменов в один сертификат (CT свяжет их публично)."
+	echo
 	echo -e "${BLUE}${BOLD}Управление:${NC}"
 	echo -e "  ${GREEN}tgwebproxy status${NC}   — статус, подключения, трафик"
 	echo -e "  ${GREEN}tgwebproxy watch${NC}    — живой мониторинг"
 	echo -e "  ${GREEN}tgwebproxy link${NC}     — снова показать ссылки"
+	echo -e "  ${GREEN}tgwebproxy mode${NC}     — сменить тип подключения (carrier mode)"
+	echo -e "  ${GREEN}tgwebproxy geo${NC}      — ограничить SSH по IP/стране (80/443 не трогает)"
 	echo -e "  ${GREEN}tgwebproxy adtag${NC}    — включить/сменить/убрать AD_TAG"
 	echo -e "  ${GREEN}tgwebproxy update${NC}   — обновить relay из репозитория"
 	echo -e "  ${GREEN}tgwebproxy uninstall${NC}— полностью удалить"
@@ -548,9 +991,12 @@ BLUE='\033[0;34m'; CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
 
 INFO_FILE="/opt/tgwebproxy/info.env"
 MTENV="/etc/mtproxy/mtproxy.env"
-ADTAG_DROPIN="/etc/systemd/system/mtproxy.service.d/adtag.conf"
+ADTAG_DROPIN="/etc/systemd/system/mtproxy.service.d/adtag.conf"   # legacy, removed on sight
+MT_DROPIN="/etc/systemd/system/mtproxy.service.d/tgwp.conf"      # the ONLY ExecStart override
 MON_UNIT="/etc/systemd/system/tgmon-counters.service"
 MON_NFT="/etc/tproxy-server/tgmon.nft"
+GEO_NFT="/etc/tgwp/geo.nft"
+GEO_UNIT="/etc/systemd/system/tgwp-geo.service"
 RELAY_ADMIN="http://127.0.0.1:8081"
 MTPROXY_STATS="http://127.0.0.1:8888"
 MON_TABLE="tgmon"
@@ -585,11 +1031,167 @@ metric(){ curl -fsS --max-time 4 "$RELAY_ADMIN/metrics" 2>/dev/null | awk -v n="
 mtstat(){ curl -fsS --max-time 4 "$MTPROXY_STATS/stats" 2>/dev/null | awk -F'\t' -v n="$1" '$1==n{print $2; exit}'; }
 conns(){ ss -Htn state established "( $1 = :$2 )" 2>/dev/null | wc -l | tr -d ' '; }
 
+# The client secret IS the MTProxy secret, so MTProxy must be started with
+# every secret the relay serves. One drop-in only — two ExecStart resets would
+# clobber each other. systemd does not word-split ${VAR}: one var per secret.
+compute_natinfo(){ local pubip="$1" localip
+	localip="$(ip -4 route get 8.8.8.8 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}')"
+	[[ -n "$pubip" && -n "$localip" && "$localip" != "$pubip" ]] && printf ' --nat-info %s:%s' "$localip" "$pubip"
+	return 0; }
+secrets_of(){ local p out=""; for p in $1; do out+="${out:+ }${p#*:}"; done; printf '%s' "$out"; }
+write_mtproxy_config(){ # <tag|""> <natinfo|""> <secret...>
+	local tag="$1" natinfo="$2"; shift 2
+	local i=0 s bs sflags="" tagflag=""
+	sed -i '/^MTPROXY_SECRET[0-9]*=/d; /^MTPROXY_TAG=/d' "$MTENV" 2>/dev/null || true
+	for s in "$@"; do
+		i=$((i+1)); bs="$s"
+		[[ "$bs" == dd* && ${#bs} -eq 34 ]] && bs="${bs:2}"
+		if [[ $i -eq 1 ]]; then printf 'MTPROXY_SECRET=%s\n' "$bs" >> "$MTENV"; sflags+=' -S ${MTPROXY_SECRET}'
+		else printf 'MTPROXY_SECRET%d=%s\n' "$i" "$bs" >> "$MTENV"; sflags+=" -S \${MTPROXY_SECRET${i}}"; fi
+	done
+	if [[ -n "$tag" ]]; then printf 'MTPROXY_TAG=%s\n' "$tag" >> "$MTENV"; tagflag=' -P ${MTPROXY_TAG}'; fi
+	chown root:mtproxy "$MTENV" 2>/dev/null || true; chmod 0640 "$MTENV"
+	mkdir -p /etc/systemd/system/mtproxy.service.d; rm -f "$ADTAG_DROPIN"
+	cat > "$MT_DROPIN" <<EOF
+[Service]
+ExecStart=
+ExecStart=/opt/MTProxy/objs/bin/mtproto-proxy -u mtproxy -p 8888 -H 2398${sflags}${tagflag}${natinfo} --aes-pwd /etc/mtproxy/proxy-secret /etc/mtproxy/proxy-multi.conf -M \${MTPROXY_WORKERS} -C \${MTPROXY_MAX_CONNECTIONS}
+EOF
+	systemctl daemon-reload; }
+verify_mtproxy_secrets(){ local want got
+	want="$(set -- $1; echo $#)"
+	got="$(systemctl show -p ExecStart mtproxy.service 2>/dev/null | tr ' ' '\n' | grep -c -- '^-S$')"
+	[[ "$got" == "$want" ]] && ok "MTProxy принял $got секрет(ов)." \
+		|| warn "MTProxy принял $got секрет(ов), профилей $want — часть ссылок может не работать."; }
+
+
+# ---------------------------------------------------------------- SSH allowlist
+# Restricting port 443 by country is a NO-GO (see `tgwebproxy geo` output):
+# it breaks Let's Encrypt (multi-perspective validation is mandatory since
+# 2025-09-15 and has no IP allowlist), and a host that answers :80 worldwide
+# but refuses :443 from everywhere except one country is a UNIQUE signature —
+# the opposite of blending in. The censor doing active probing also sits
+# INSIDE the country you would allowlist. So only management access is fenced.
+#
+# Own table `inet tgfilter` (never touches upstream's tproxy_backend or tgmon),
+# policy accept with surgical DROPs so a bad list cannot lock you out of
+# everything, and DROP rather than REJECT (a timeout reads as a dead IP).
+do_geo(){
+	need_root geo
+	echo -e "${YELLOW}${BOLD}Ограничение доступа к SSH (порт 22)${NC}\n"
+	warn "Порты 80/443 НЕ ограничиваются и не должны: домен обязан выглядеть обычным сайтом."
+	msg  "Почему не гео-фильтр на 443:"
+	msg  "  • ломается выпуск/продление Let's Encrypt (проверка идёт с нескольких стран);"
+	msg  "  • хост, открытый на :80 всему миру и закрытый на :443 всем кроме одной страны,"
+	msg  "    становится уникально detectable — это ухудшает маскировку, а не улучшает;"
+	msg  "  • активный пробинг цензора идёт ИЗНУТРИ той же страны, которую вы разрешаете;"
+	msg  "  • домен и так опубликован в Certificate Transparency."
+	echo
+
+	local cur="${SSH_CLIENT%% *}"; [[ -z "$cur" ]] && cur="${SSH_CONNECTION%% *}"
+	[[ -n "$cur" ]] && msg "Ваш текущий SSH-адрес: ${GREEN}${cur}${NC}"
+
+	local input
+	if [[ $# -ge 1 ]]; then input="$*"
+	elif [[ -e /dev/tty ]] && read -r -p "Разрешить SSH с (IP/CIDR через запятую, код страны вида ru, или 'off'): " input </dev/tty; then :
+	else err "Нужен терминал или аргумент: tgwebproxy geo <ip/cidr[,...]|<cc>|off>"; exit 1; fi
+	input="$(echo "$input" | tr 'A-Z' 'a-z' | tr -d '[:space:]')"
+
+	if [[ "$input" == "off" || -z "$input" ]]; then
+		systemctl disable --now tgwp-geo.service 2>/dev/null || true
+		nft delete table inet tgfilter 2>/dev/null || true
+		rm -f "$GEO_UNIT" "$GEO_NFT"; systemctl daemon-reload 2>/dev/null || true
+		ok "Ограничение SSH снято."; return 0
+	fi
+
+	local v4="" v6="" item tmp
+	local -a items; IFS=',' read -r -a items <<< "$input"
+	for item in "${items[@]}"; do
+		[[ -z "$item" ]] && continue
+		if [[ "$item" =~ ^[a-z]{2}$ ]]; then
+			msg "Загружаю список сетей страны '$item'…"
+			tmp="$(mktemp)"
+			if curl -fsS --max-time 30 --proto '=https' \
+				"https://raw.githubusercontent.com/ipverse/country-ip-blocks/master/country/${item}/ipv4-aggregated.txt" \
+				-o "$tmp" 2>/dev/null; then
+				local n; n="$(grep -Ecx '([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}' "$tmp" || true)"
+				if [[ "$n" -lt 32 ]]; then err "Список '$item' подозрительно мал ($n) — пропускаю."; rm -f "$tmp"; continue; fi
+				v4+="${v4:+, }$(grep -Ex '([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}' "$tmp" | paste -sd, -)"
+				msg "  добавлено $n сетей"
+			else err "Не удалось скачать список для '$item'."; fi
+			rm -f "$tmp"
+		elif [[ "$item" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}(/[0-9]{1,2})?$ ]]; then
+			[[ "$item" == */* ]] || item="${item}/32"
+			v4+="${v4:+, }${item}"
+		elif [[ "$item" == *:* ]]; then
+			[[ "$item" == */* ]] || item="${item}/128"
+			v6+="${v6:+, }${item}"
+		else
+			warn "Пропускаю нераспознанное значение: $item"
+		fi
+	done
+	[[ -z "$v4$v6" ]] && { err "Не набралось ни одной валидной сети — ничего не меняю."; exit 1; }
+
+	mkdir -p /etc/tgwp
+	{
+	echo "#!/usr/sbin/nft -f"
+	echo "add table inet tgfilter"
+	echo "delete table inet tgfilter"
+	echo "table inet tgfilter {"
+	[[ -n "$v4" ]] && echo "	set admin4 { type ipv4_addr; flags interval; auto-merge; elements = { $v4 } }"
+	[[ -n "$v6" ]] && echo "	set admin6 { type ipv6_addr; flags interval; auto-merge; elements = { $v6 } }"
+	echo "	chain input {"
+	echo "		type filter hook input priority -5; policy accept;"
+	echo "		iif lo accept"
+	echo "		ct state established,related accept"
+	# emit a family rule ONLY when its set exists, or an empty set drops everything
+	[[ -n "$v4" ]] && echo "		tcp dport 22 ct state new ip saddr != @admin4 counter drop"
+	[[ -n "$v6" ]] && echo "		tcp dport 22 ct state new ip6 saddr != @admin6 counter drop"
+	echo "		# 80/443 deliberately untouched"
+	echo "	}"
+	echo "}"
+	} > "$GEO_NFT"
+	chmod 0644 "$GEO_NFT"
+
+	if ! nft -c -f "$GEO_NFT" >/dev/null 2>&1; then
+		err "Правила не прошли проверку nft — ничего не применено."
+		nft -c -f "$GEO_NFT" 2>&1 | head -5 | sed 's/^/    /'
+		rm -f "$GEO_NFT"; exit 1
+	fi
+
+	cat > "$GEO_UNIT" <<EOF
+[Unit]
+Description=SSH allowlist for the Telegram WEB proxy host
+After=nftables.service
+PartOf=nftables.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=true
+ExecStart=/usr/sbin/nft -f $GEO_NFT
+ExecReload=/usr/sbin/nft -f $GEO_NFT
+ExecStop=-/usr/sbin/nft delete table inet tgfilter
+
+[Install]
+WantedBy=multi-user.target
+EOF
+	systemctl daemon-reload
+	systemctl enable --now tgwp-geo.service >/dev/null 2>&1 || { err "Не удалось применить."; exit 1; }
+	ok "SSH ограничен. Правила переживут перезагрузку."
+	[[ -n "$cur" ]] && msg "Проверьте НОВЫМ соединением, не закрывая текущее: ssh ${cur} → должно работать."
+	warn "Если потеряете доступ — снять через консоль провайдера: nft delete table inet tgfilter"
+}
+
 show_link(){
 	need_root link; load_info
 	echo -e "${YELLOW}${BOLD}Ссылки подключения:${NC}"
-	echo -e "  ${GREEN}https://t.me/webproxy?server=$HOSTNAME&secret=$SECRET${NC}"
-	echo -e "  ${GREEN}tg://webproxy?server=$HOSTNAME&secret=$SECRET${NC}"
+	local p m s
+	for p in ${PROFILES:-https:$SECRET}; do
+		m="${p%%:*}"; s="${p#*:}"
+		echo -e "  ${BOLD}[$m]${NC}"
+		echo -e "    ${GREEN}https://t.me/webproxy?server=$HOSTNAME&secret=$s${NC}"
+		echo -e "    ${GREEN}tg://webproxy?server=$HOSTNAME&secret=$s${NC}"
+	done
 	echo
 	echo -e "  Ручной ввод: Telegram → Настройки → Продвинутые → Тип соединения →"
 	echo -e "  Добавить прокси → ${BOLD}WEB${NC} → Hostname: ${GREEN}$HOSTNAME${NC}, Secret: ${GREEN}$SECRET${NC}"
@@ -597,10 +1199,70 @@ show_link(){
 	warn "Нужен клиент с поддержкой WEB-прокси: Desktop ≥ 7.1.1 или Android beta 12.10.2+."
 }
 
+# Switch the carrier mode (transport) after installation.
+do_mode(){
+	need_root mode; load_info
+	local pf="/etc/tproxy-server/profiles.json"
+	echo -e "${YELLOW}${BOLD}Тип подключения (carrier mode)${NC}\n"
+	msg "Текущий: ${MODE:-https}"
+	echo -e "  ${BOLD}https${NC}           — один POST + long-poll, консервативный дефолт"
+	echo -e "  ${BOLD}https-lanes${NC}     — своя пара запросов на поток, ниже задержки (нужен HTTP/2)"
+	echo -e "  ${BOLD}websocket${NC}       — один WebSocket на всё, быстрее всего"
+	echo -e "  ${BOLD}websocket-lanes${NC} — свой WebSocket на поток, медиа не блокирует чат"
+	echo -e "  ${BOLD}all${NC}             — все четыре сразу (4 секрета, 4 ссылки)"
+	echo
+	local new
+	if [[ $# -ge 1 ]]; then new="$1"
+	elif [[ -e /dev/tty ]] && read -r -p "Новый режим: " new </dev/tty; then :
+	else err "Нужен терминал или аргумент: tgwebproxy mode <https|https-lanes|websocket|websocket-lanes|all>"; exit 1; fi
+	new="$(echo "$new" | tr 'A-Z' 'a-z' | tr -d '[:space:]')"
+	case "$new" in https|https-lanes|websocket|websocket-lanes|all) ;;
+		*) err "Неизвестный режим: $new"; exit 1 ;; esac
+
+	local list="" json="" first=1 m s
+	if [[ "$new" == "all" ]]; then
+		for m in https https-lanes websocket websocket-lanes; do
+			if [[ "$m" == "https" ]]; then s="$SECRET"
+			else s="$(head -c16 /dev/urandom | od -An -tx1 | tr -d ' \n')"; fi
+			list+="${list:+ }${m}:${s}"
+			[[ $first -eq 1 ]] || json+=","; first=0
+			json+="{\"name\":\"${m}\",\"secret\":\"${s}\",\"backend\":\"127.0.0.1:2398\",\"carrier_mode\":\"${m}\"}"
+		done
+	else
+		list="${new}:${SECRET}"
+		json="{\"name\":\"default\",\"secret\":\"${SECRET}\",\"backend\":\"127.0.0.1:2398\",\"carrier_mode\":\"${new}\"}"
+	fi
+
+	cp -a "$pf" "$pf.bak" 2>/dev/null || true
+	printf '{"profiles":[%s]}\n' "$json" > "$pf"
+	chown root:tproxy "$pf" 2>/dev/null || true; chmod 0400 "$pf"
+	if ! /usr/local/bin/tproxy-server -config /etc/tproxy-server/config.json \
+			-profiles-file "$pf" -check >/dev/null 2>&1; then
+		err "Проверка конфигурации не прошла — откатываю."
+		[[ -f "$pf.bak" ]] && mv -f "$pf.bak" "$pf"
+		systemctl restart tproxy-server.service 2>/dev/null || true
+		exit 1
+	fi
+	rm -f "$pf.bak"
+	# MTProxy must know every new secret, otherwise those links die silently
+	local natinfo=""; [[ -n "${ADTAG:-}" ]] && natinfo="$(compute_natinfo "${PUBIP:-}")"
+	local -a secs; read -r -a secs <<< "$(secrets_of "$list")"
+	write_mtproxy_config "${ADTAG:-}" "$natinfo" "${secs[@]}"
+	systemctl restart mtproxy.service || warn "MTProxy не перезапустился — journalctl -u mtproxy"
+	systemctl restart tproxy-server.service
+	verify_mtproxy_secrets "$list"
+	sed -i "s|^MODE=.*|MODE=\"$new\"|; s|^PROFILES=.*|PROFILES=\"$list\"|" "$INFO_FILE"
+	grep -q '^MODE=' "$INFO_FILE" || printf 'MODE="%s"\n' "$new" >> "$INFO_FILE"
+	grep -q '^PROFILES=' "$INFO_FILE" || printf 'PROFILES="%s"\n' "$list" >> "$INFO_FILE"
+	ok "Режим переключён на $new. Активные сессии переподключатся."
+	echo; show_link
+}
+
 show_status(){
 	need_root status; load_info
 	echo -e "${BLUE}${BOLD}=== Telegram WEB Proxy — статус ===${NC}\n"
 	echo -e "Домен: ${GREEN}${HOSTNAME:-?}${NC}   Установлен: ${INSTALLED_AT:-?}   Коммит: ${REPO_REF:-?}"
+	echo -e "Транспорт: ${GREEN}${MODE:-https}${NC}   Профилей: ${GREEN}$(set -- ${PROFILES:-x}; echo $#)${NC}"
 
 	echo -e "\n${YELLOW}Службы:${NC}"
 	local s state
@@ -706,20 +1368,22 @@ do_adtag(){
 		[[ "$new" =~ ^[0-9a-f]{32}$ ]] || { err "AD_TAG должен быть 32 hex (или 'off' для удаления)."; exit 1; }
 		localip="$(ip -4 route get 8.8.8.8 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}' || true)"
 		[[ -n "$pubip" && -n "$localip" && "$localip" != "$pubip" ]] && natinfo=" --nat-info ${localip}:${pubip}"
-		if grep -q '^MTPROXY_TAG=' "$MTENV" 2>/dev/null; then sed -i "s/^MTPROXY_TAG=.*/MTPROXY_TAG=$new/" "$MTENV"
-		else echo "MTPROXY_TAG=$new" >> "$MTENV"; fi
-		mkdir -p "$(dirname "$ADTAG_DROPIN")"
-		cat > "$ADTAG_DROPIN" <<EOF
-[Service]
-ExecStart=
-ExecStart=/opt/MTProxy/objs/bin/mtproto-proxy -u mtproxy -p 8888 -H 2398 -S \${MTPROXY_SECRET} -P \${MTPROXY_TAG}${natinfo} --aes-pwd /etc/mtproxy/proxy-secret /etc/mtproxy/proxy-multi.conf -M \${MTPROXY_WORKERS} -C \${MTPROXY_MAX_CONNECTIONS}
-EOF
-		systemctl daemon-reload; systemctl restart mtproxy.service
-		sed -i "s|^ADTAG=.*|ADTAG=\"$new\"|" "$INFO_FILE"
-		ok "AD_TAG установлен: $new (middle-proxy mode)."
+		local -a secs; read -r -a secs <<< "$(secrets_of "${PROFILES:-https:$SECRET}")"
+		write_mtproxy_config "$new" "$natinfo" "${secs[@]}"
+		if systemctl restart mtproxy.service 2>/dev/null; then
+			sed -i "s|^ADTAG=.*|ADTAG=\"$new\"|" "$INFO_FILE"
+			ok "AD_TAG установлен: $new (middle-proxy mode)."
+		else
+			err "MTProxy не запустился с этим тегом — откатываю."
+			write_mtproxy_config "" "" "${secs[@]}"
+			systemctl restart mtproxy.service || err "MTProxy не стартует — journalctl -u mtproxy"
+			sed -i 's|^ADTAG=.*|ADTAG=""|' "$INFO_FILE"; exit 1
+		fi
+		verify_mtproxy_secrets "${PROFILES:-https:$SECRET}"
 	else
-		rm -f "$ADTAG_DROPIN"; sed -i '/^MTPROXY_TAG=/d' "$MTENV" 2>/dev/null || true
-		systemctl daemon-reload; systemctl restart mtproxy.service
+		local -a secs; read -r -a secs <<< "$(secrets_of "${PROFILES:-https:$SECRET}")"
+		write_mtproxy_config "" "" "${secs[@]}"
+		systemctl restart mtproxy.service
 		sed -i 's|^ADTAG=.*|ADTAG=""|' "$INFO_FILE"
 		ok "AD_TAG убран (direct relay mode)."
 	fi
@@ -745,16 +1409,19 @@ do_uninstall(){
 	msg "Останавливаю службы…"
 	systemctl disable --now caddy.service tproxy-server.service mtproxy.service \
 		refresh-mtproxy-config.timer refresh-mtproxy-config.service tproxy-firewall.service \
-		tgmon-counters.service 2>/dev/null || true
+		tgmon-counters.service tgwp-geo.service 2>/dev/null || true
 
 	msg "Удаляю firewall-таблицы…"
 	nft delete table inet tproxy_backend 2>/dev/null || true
 	nft delete table inet "$MON_TABLE" 2>/dev/null || true
+	nft delete table inet tgfilter 2>/dev/null || true
 
 	msg "Удаляю systemd-юниты…"
 	rm -f /etc/systemd/system/{tproxy-server,mtproxy,tproxy-firewall,refresh-mtproxy-config}.service
-	rm -f /etc/systemd/system/refresh-mtproxy-config.timer "$MON_UNIT"
-	rm -rf /etc/systemd/system/mtproxy.service.d
+	rm -f /etc/systemd/system/refresh-mtproxy-config.timer "$MON_UNIT" "$GEO_UNIT"
+	rm -rf /etc/systemd/system/mtproxy.service.d /etc/tgwp
+	rm -f /etc/caddy/Caddyfile.tproxy
+	rm -rf /opt/MTProxy.before-tproxy.*
 	rm -f /usr/local/bin/tproxy-server /usr/local/bin/tproxy-server.previous /usr/local/bin/tproxy-server.next
 	rm -f /usr/local/sbin/refresh-mtproxy-config
 	rm -rf /etc/tproxy-server /etc/mtproxy /opt/MTProxy /opt/MTProxy.before-tproxy.* /opt/tproxy-server-src
@@ -798,6 +1465,8 @@ show_help(){
 	echo -e "  ${GREEN}status${NC}         — статус служб, подключения, трафик, метрики"
 	echo -e "  ${GREEN}watch${NC}          — живой мониторинг (обновление каждые 2с)"
 	echo -e "  ${GREEN}link${NC}           — показать ссылки подключения"
+	echo -e "  ${GREEN}mode [режим]${NC}   — сменить тип подключения (carrier mode)"
+	echo -e "  ${GREEN}geo [ip|cc|off]${NC}— ограничить SSH по IP/стране (80/443 не трогает)"
 	echo -e "  ${GREEN}logs${NC}           — журналы relay/MTProxy/Caddy (follow)"
 	echo -e "  ${GREEN}restart${NC}        — перезапустить службы"
 	echo -e "  ${GREEN}update${NC}         — обновить relay из репозитория (с откатом)"
@@ -810,6 +1479,8 @@ case "${1:-status}" in
 	status)     show_status ;;
 	watch)      do_watch ;;
 	link|links) show_link ;;
+	mode)       shift || true; do_mode "$@" ;;
+	geo)        shift || true; do_geo "$@" ;;
 	logs)       do_logs ;;
 	restart)    do_restart ;;
 	update)     do_update ;;
@@ -829,7 +1500,7 @@ main() {
 	local cmd="${1:-install}"
 	case "$cmd" in
 		install|"") do_install ;;
-		status|watch|link|links|logs|restart|update|adtag|tag|uninstall)
+		status|watch|link|links|mode|geo|logs|restart|update|adtag|tag|uninstall)
 			if [[ -x "$MGMT" ]]; then exec "$MGMT" "$@"
 			else die "WEB-прокси ещё не установлен. Сначала запустите установку без аргументов."; fi ;;
 		help|-h|--help)
@@ -839,10 +1510,11 @@ main() {
 			echo -e "  ${GREEN}bash <(wget -qO- https://dignezzz.github.io/server/tg-webproxy.sh) uninstall${NC}  — удаление"
 			echo
 			echo -e "После установки — команда ${GREEN}tgwebproxy${NC}:"
-			echo -e "  status | watch | link | logs | restart | update | adtag | uninstall | help"
+			echo -e "  status | watch | link | mode | geo | logs | restart | update | adtag | uninstall | help"
 			echo
 			echo "Env для non-interactive установки:"
-			echo "  TGWP_HOSTNAME TGWP_EMAIL TGWP_SECRET TGWP_ADTAG TGWP_WORKERS TGWP_MAXCONN TGWP_SITE_DIR TGWP_REF TGWP_YES=1" ;;
+			echo "  TGWP_HOSTNAME TGWP_EMAIL TGWP_SECRET TGWP_MODE TGWP_ADTAG"
+			echo "  TGWP_WORKERS TGWP_MAXCONN TGWP_SITE_DIR TGWP_REF TGWP_YES=1" ;;
 		*) die "Неизвестная команда '$cmd'. Справка: $SELF help" ;;
 	esac
 }
