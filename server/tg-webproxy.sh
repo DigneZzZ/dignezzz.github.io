@@ -25,6 +25,8 @@
 # Split mode (relay and MTProxy on different hosts, joined by NetBird/WireGuard):
 #   TGWP_ROLE=front   + TGWP_BACKEND=<tunnel ip[:port]>            (Caddy + relay here)
 #   TGWP_ROLE=backend + TGWP_SECRETS="s1 s2" TGWP_ALLOW_FROM=<cidr,...>  (only MTProxy here)
+# Networks that block core.telegram.org: put getProxySecret/getProxyConfig into
+#   /opt/tgwebproxy/tg/{proxy-secret,proxy-multi.conf} or set TGWP_TG_MIRROR=https://host/path
 #
 # Requirements: root, x86_64, systemd, Ubuntu 22.04+/Debian 12+, public IPv4,
 #               a dedicated hostname with an A record → this server.
@@ -32,7 +34,7 @@
 set -euo pipefail
 umask 077
 
-TGWP_VERSION="1.3.0"   # bump on every change: `tgwebproxy version` / self-update compare it
+TGWP_VERSION="1.3.2"   # bump on every change: `tgwebproxy version` / self-update compare it
 # C.UTF-8 is built into glibc >= 2.35 (Ubuntu 22.04+/Debian 12+): keeps ${var:0:1}
 # and tr multibyte-safe even when the SSH client forwards an uninstalled locale.
 export LC_ALL=C.UTF-8
@@ -74,6 +76,8 @@ MON_TABLE="tgmon"                       # nftables table: inet tgmon (traffic co
 BK_SOCKET="/etc/systemd/system/tgwp-backend.socket"    # front role: loopback :2398 -> remote MTProxy
 BK_SERVICE="/etc/systemd/system/tgwp-backend.service"
 UP_FW_NFT="/etc/tproxy-server/firewall.nft"            # backend role: our rules, applied by upstream's tproxy-firewall.service
+TG_DIR="${STATE_DIR}/tg"                                # optional local copies of core.telegram.org files (see check_telegram_reach)
+TG_DCS="149.154.175.50 149.154.167.51 149.154.175.100 149.154.167.91 91.108.56.130"   # DC1..DC5; MTProxy dials :8888 there
 
 RELAY_ADMIN="http://127.0.0.1:8081"     # /healthz /readyz /metrics
 
@@ -260,6 +264,7 @@ backend_upstream() { # <workers> <maxconn>  (inside run_logged): build MTProxy +
 do_install_backend() {
 	local PREV_SECRETS PREV_ALLOW PREV_ADTAG
 	PREV_SECRETS="$(prev_field SECRETS)"; PREV_ALLOW="$(prev_field ALLOW_FROM)"; PREV_ADTAG="$(prev_field ADTAG)"
+	check_telegram_reach backend
 	head2 "1) Подготовка"
 	: > "$LOG"; chmod 0600 "$LOG"
 	run_logged "Зависимости (git, curl, nftables, vnstat)" "" install_prereqs \
@@ -332,7 +337,7 @@ EOF
 	chmod 0600 "$INFO_FILE"
 	install_mgmt_cli
 	[[ -d /opt/MTProxy/objs ]] && { chmod -R a+rX /opt/MTProxy 2>/dev/null || true; }
-	make_runuser_shim
+	make_runuser_shim; make_curl_shim
 	rm -f "$ADTAG_DROPIN" "$MT_DROPIN"; systemctl daemon-reload 2>/dev/null || true
 	msg "Коммит tproxy-server: ${GREEN}$REPO_REF${NC}. Сборка MTProxy занимает пару минут; полный вывод: $LOG"
 	run_logged "Сборка MTProxy" install_phase backend_upstream "$WORKERS" "$MAXCONN" || { report_install_failure; exit 1; }
@@ -412,6 +417,78 @@ make_runuser_shim() {
 		"$real" > "$STATE_DIR/shim/runuser"
 	chmod 0755 "$STATE_DIR/shim/runuser"
 }
+# Runs FIRST, before any question or package: a host that cannot reach Telegram is
+# the wrong host, and the operator should hear that immediately, not after a build.
+# MTProxy dials the DC middle-proxies on :8888 (see getProxyConfig) and the
+# installer needs proxy-secret + the DC list from core.telegram.org. Networks that
+# block the domain (a 404 stub from a filter is the usual symptom) get two escape
+# hatches for the files: local copies in $TG_DIR, or a mirror URL, served to
+# upstream's script by a curl PATH shim. Nothing can substitute unreachable DCs.
+probe_fast() { timeout 2 bash -c "exec 3<>/dev/tcp/${1%:*}/${1##*:}" 2>/dev/null; }
+check_telegram_reach() { # <role>
+	local role="${1:-single}" ip code ok8=0 ok443=0 total
+	[[ "$role" == front ]] && return 0          # the front never talks to Telegram itself
+	if [[ "${TGWP_SKIP_REACH:-}" == "1" ]]; then warn "Проверка доступности Telegram пропущена (TGWP_SKIP_REACH=1)."; return 0; fi
+	head2 "Доступность Telegram с этого сервера"
+	mkdir -p "$TG_DIR"
+	total="$(set -- $TG_DCS; echo $#)"
+	for ip in $TG_DCS; do probe_fast "$ip:8888" && ok8=$((ok8 + 1)); done
+	for ip in ${TG_DCS%% *} ${TG_DCS#* }; do probe_fast "${ip%% *}:443" && ok443=$((ok443 + 1)); break; done
+	code="$(curl -sS -o /dev/null --max-time 10 -w '%{http_code}' https://core.telegram.org/getProxySecret 2>/dev/null || echo 000)"
+	if (( ok8 == 0 )); then
+		err "Этот сервер не подходит: дата-центры Telegram недоступны — ни один из $total адресов не отвечает на :8888${ok443:+, :443 $( (( ok443 > 0 )) && echo отвечает || echo тоже молчит)}."
+		err "MTProxy здесь работать не будет. Возьмите сервер в другой стране или сети (обычно так выглядит хостинг в РФ)."
+		msg "Проверить вручную: ${GREEN}timeout 3 bash -c '</dev/tcp/149.154.175.50/8888' && echo ok${NC}"
+		msg "Хост без доступа к Telegram годится только на роль front в split-режиме (MTProxy на другом сервере)."
+		exit 3
+	fi
+	ok "Дата-центры Telegram доступны ($ok8 из $total на :8888)"
+	if [[ "$code" == 200 ]]; then ok "core.telegram.org доступен (proxy-secret, конфигурация DC)"
+	elif [[ -s "$TG_DIR/proxy-secret" && -s "$TG_DIR/proxy-multi.conf" ]]; then
+		warn "core.telegram.org отвечает $code — беру локальные копии из $TG_DIR."
+	elif [[ -n "${TGWP_TG_MIRROR:-}" ]]; then
+		warn "core.telegram.org отвечает $code — файлы будут взяты с зеркала ${TGWP_TG_MIRROR}."
+	else
+		err "core.telegram.org недоступен с этого сервера (HTTP $code): установщик не получит proxy-secret и список дата-центров."
+		msg "Проще взять сервер в другой сети. Если всё же здесь — скачайте на любой машине с доступом и положите на сервер:"
+		msg "  curl -o proxy-secret https://core.telegram.org/getProxySecret"
+		msg "  curl -o proxy-multi.conf https://core.telegram.org/getProxyConfig"
+		msg "  scp proxy-secret proxy-multi.conf root@<сервер>:$TG_DIR/"
+		msg "или укажите зеркало с этими двумя файлами: TGWP_TG_MIRROR=https://host/path"
+		die "Без этих файлов установка невозможна — повторите после копирования."
+	fi
+}
+make_curl_shim() {
+	local real; real="$(command -v curl 2>/dev/null || true)"
+	[[ -n "$real" && "$real" != "$STATE_DIR/shim/curl" ]] || return 0
+	mkdir -p "$STATE_DIR/shim"
+	{
+		printf '#!/usr/bin/env bash\n# tg-webproxy.sh shim: serve core.telegram.org files from local copies or a mirror\n# when the network blocks the domain; every other URL goes to the real curl.\n'
+		printf 'REAL=%q; LOCAL=%q; MIRROR=%q\n' "$real" "$TG_DIR" "${TGWP_TG_MIRROR:-}"
+		cat <<'EOF'
+url=""; out=""; args=("$@"); n=${#args[@]}
+for ((i = 0; i < n; i++)); do
+	case "${args[i]}" in
+		-o|--output) out="${args[i+1]:-}" ;;
+		https://core.telegram.org/*) url="${args[i]}" ;;
+	esac
+done
+if [[ -n "$url" ]]; then
+	name="${url##*/}"; f=""
+	case "$name" in getProxySecret) f="$LOCAL/proxy-secret" ;; getProxyConfig) f="$LOCAL/proxy-multi.conf" ;; esac
+	if [[ -n "$f" && -s "$f" ]]; then
+		if [[ -n "$out" ]]; then cp "$f" "$out"; else cat "$f"; fi
+		exit 0
+	fi
+	if [[ -n "$MIRROR" ]]; then
+		for ((i = 0; i < n; i++)); do [[ "${args[i]}" == "$url" ]] && args[i]="${MIRROR%/}/$name"; done
+	fi
+fi
+exec "$REAL" "${args[@]}"
+EOF
+	} > "$STATE_DIR/shim/curl"
+	chmod 0755 "$STATE_DIR/shim/curl"
+}
 mtproxy_exec_failed() { # did mtproxy.service die with 203/EXEC?
 	systemctl is-failed --quiet mtproxy.service 2>/dev/null \
 		&& journalctl -u mtproxy.service -n 30 --no-pager 2>/dev/null | grep -q '203/EXEC'
@@ -442,6 +519,10 @@ report_install_failure() {
 	elif journalctl -u mtproxy.service -n 30 --no-pager 2>/dev/null | grep -q '203/EXEC'; then
 		msg "Причина: systemd не может запустить /opt/MTProxy/objs/bin/mtproto-proxy от пользователя mtproxy (203/EXEC — нет прав)."
 		msg "Исправление: chmod -R a+rX /opt/MTProxy && systemctl restart mtproxy && curl -fsS $RELAY_ADMIN/readyz"
+	elif grep -q 'curl: (22)' "$LOG" && ! grep -q 'go: downloading' "$LOG"; then
+		msg "Причина: не скачались proxy-secret / конфигурация DC с core.telegram.org (сеть сервера блокирует домен):"
+		grep 'curl: (22)' "$LOG" | tail -n 2 | sed 's/^/    /'
+		msg "Положите файлы в $TG_DIR (см. подсказку шага «Подготовка	) или задайте TGWP_TG_MIRROR, затем повторите."
 	elif grep -q 'did not become ready' "$LOG"; then
 		msg "Причина: relay не ответил на /readyz — не поднялся tproxy-server или MTProxy:"
 		journalctl -u tproxy-server -u mtproxy --no-pager -n 12 2>/dev/null | sed 's/^/    /' || true
@@ -494,6 +575,7 @@ do_install() {
 	case "$ROLE" in single|front|backend) ;; "") ROLE=single ;; *) warn "Неизвестная роль '$ROLE' — использую single."; ROLE=single ;; esac
 	if [[ "$ROLE" == backend ]]; then do_install_backend; return 0; fi
 	ok "Роль: $ROLE"
+	check_telegram_reach "$ROLE"
 	local BACKEND="" TUN_IP=""
 	if [[ "$ROLE" == front ]]; then
 		TUN_IP="$(tunnel_ip || true)"
@@ -667,7 +749,7 @@ do_install() {
 	export GOFLAGS='-skip=TestLoadAcceptsSystemdCredentialReadPermissions'
 	# Re-install: a binary built by an earlier run may still be 0700 root (see make_runuser_shim)
 	[[ -d /opt/MTProxy/objs ]] && { chmod -R a+rX /opt/MTProxy 2>/dev/null || true; }
-	make_runuser_shim
+	make_runuser_shim; make_curl_shim
 	RUN_STDIN="$SECRET"     # the secret goes in via stdin: never in argv / ps
 	if ! run_logged "Сборка и установка" install_phase \
 			upstream_install "$HOSTNAME" "$EMAIL" "$WORKERS" "$MAXCONN" "${SITE_ARG[@]}"; then
@@ -2126,7 +2208,9 @@ main() {
 			echo "Env для non-interactive установки:"
 			echo "  TGWP_HOSTNAME TGWP_EMAIL TGWP_SECRET TGWP_MODE TGWP_ADTAG"
 			echo "  TGWP_WORKERS TGWP_MAXCONN TGWP_SITE_DIR TGWP_REF TGWP_YES=1"
-			echo "  Split: TGWP_ROLE=front TGWP_BACKEND=ip:port  |  TGWP_ROLE=backend TGWP_SECRETS='s1 s2' TGWP_ALLOW_FROM=cidr,..." ;;
+			echo "  Split: TGWP_ROLE=front TGWP_BACKEND=ip:port  |  TGWP_ROLE=backend TGWP_SECRETS='s1 s2' TGWP_ALLOW_FROM=cidr,..."
+			echo "  Блокировка core.telegram.org: файлы в /opt/tgwebproxy/tg/ или TGWP_TG_MIRROR=https://host/path"
+			echo "  TGWP_SKIP_REACH=1 — не проверять доступность Telegram (на свой риск)" ;;
 		*) die "Неизвестная команда '$cmd'. Справка: аргумент help" ;;
 	esac
 }
