@@ -12,15 +12,19 @@
 # connection/traffic monitoring, and a management CLI.
 #
 # Usage:
-#   bash <(wget -qO- https://dignezzz.github.io/server/tg-webproxy.sh)          # interactive install
-#   bash <(wget -qO- https://dignezzz.github.io/server/tg-webproxy.sh) status   # requires prior install
-#   ... status | watch | link | mode | logs | restart | update | adtag | uninstall | version | self-update | help
+#   bash <(wget -qO- https://raw.githubusercontent.com/DigneZzZ/tg-webproxy/main/tg-webproxy.sh)   # interactive install
+#   mirror: https://dignezzz.github.io/server/tg-webproxy.sh   (same script, GitHub Pages)
+#   Repository, docs, issues: https://github.com/DigneZzZ/tg-webproxy
+#   ... status | watch | link | mode | logs | restart | update | adtag | version | self-update | uninstall | help
 #
 # Non-interactive install (env overrides): TGWP_HOSTNAME, TGWP_EMAIL,
 #   TGWP_SECRET (32 hex or dd+32hex; empty = auto/keep), TGWP_ADTAG (32 hex),
 #   TGWP_MODE (https|https-lanes|websocket|websocket-lanes|all),
 #   TGWP_WORKERS, TGWP_MAXCONN, TGWP_SITE_DIR (own site), TGWP_REF (pin repo commit),
 #   TGWP_YES=1 (auto-confirm all prompts).
+# Split mode (relay and MTProxy on different hosts, joined by NetBird/WireGuard):
+#   TGWP_ROLE=front   + TGWP_BACKEND=<tunnel ip[:port]>            (Caddy + relay here)
+#   TGWP_ROLE=backend + TGWP_SECRETS="s1 s2" TGWP_ALLOW_FROM=<cidr,...>  (only MTProxy here)
 #
 # Requirements: root, x86_64, systemd, Ubuntu 22.04+/Debian 12+, public IPv4,
 #               a dedicated hostname with an A record → this server.
@@ -28,15 +32,15 @@
 set -euo pipefail
 umask 077
 
-TGWP_VERSION="1.2.0"   # bump on every change: `tgwebproxy version` / self-update compare it
+TGWP_VERSION="1.3.0"   # bump on every change: `tgwebproxy version` / self-update compare it
 # C.UTF-8 is built into glibc >= 2.35 (Ubuntu 22.04+/Debian 12+): keeps ${var:0:1}
 # and tr multibyte-safe even when the SSH client forwards an uninstalled locale.
 export LC_ALL=C.UTF-8
 export NEEDRESTART_SUSPEND=1   # no "Scanning processes…" / service restarts from apt hooks
 
 # ---------------------------------------------------------------- appearance
-RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
-BLUE='\033[0;34m'; CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
+RED=$'\033[38;5;196m'; GREEN=$'\033[38;5;46m'; YELLOW=$'\033[38;5;214m'
+BLUE=$'\033[38;5;39m'; CYAN=$'\033[38;5;51m'; BOLD=$'\033[1m'; DIM=$'\033[38;5;245m'; NC=$'\033[0m'
 
 msg()  { echo -e "${CYAN}$*${NC}"; }
 ok()   { echo -e "${GREEN}✅ $*${NC}"; }
@@ -56,9 +60,9 @@ LOG="/var/log/tgwebproxy-install.log"   # full apt/make/go/installer output
 # Where the published script lives. Version checks read the first 4 KB of each
 # and take the HIGHEST version found (jsDelivr/Pages may lag behind raw GitHub).
 SCRIPT_URLS=(
+	"https://raw.githubusercontent.com/DigneZzZ/tg-webproxy/main/tg-webproxy.sh"
+	"https://cdn.jsdelivr.net/gh/DigneZzZ/tg-webproxy@main/tg-webproxy.sh"
 	"https://dignezzz.github.io/server/tg-webproxy.sh"
-	"https://raw.githubusercontent.com/DigneZzZ/dignezzz.github.io/main/server/tg-webproxy.sh"
-	"https://cdn.jsdelivr.net/gh/DigneZzZ/dignezzz.github.io@main/server/tg-webproxy.sh"
 )
 
 MTENV="/etc/mtproxy/mtproxy.env"
@@ -67,6 +71,9 @@ MT_DROPIN="/etc/systemd/system/mtproxy.service.d/tgwp.conf"      # the ONLY Exec
 MON_NFT="/etc/tproxy-server/tgmon.nft"
 MON_UNIT="/etc/systemd/system/tgmon-counters.service"
 MON_TABLE="tgmon"                       # nftables table: inet tgmon (traffic counters)
+BK_SOCKET="/etc/systemd/system/tgwp-backend.socket"    # front role: loopback :2398 -> remote MTProxy
+BK_SERVICE="/etc/systemd/system/tgwp-backend.service"
+UP_FW_NFT="/etc/tproxy-server/firewall.nft"            # backend role: our rules, applied by upstream's tproxy-firewall.service
 
 RELAY_ADMIN="http://127.0.0.1:8081"     # /healthz /readyz /metrics
 
@@ -144,6 +151,212 @@ check_self_version() { # one warning if a newer script is published; never block
 	return 0
 }
 
+# ---------------------------------------------------------------- split mode helpers
+tunnel_iface() { local i; for i in wt0 wg0 nb0 tun0; do ip -4 -o addr show dev "$i" 2>/dev/null | grep -q inet && { printf '%s' "$i"; return 0; }; done; return 1; }
+tunnel_ip()    { local i; i="$(tunnel_iface)" || return 1; ip -4 -o addr show dev "$i" | awk '{print $4; exit}' | cut -d/ -f1; }
+probe_tcp()    { timeout 3 bash -c "exec 3<>/dev/tcp/${1%:*}/${1##*:}" 2>/dev/null; }   # <ip:port>
+norm_backend() { [[ "${1:-}" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}(:[0-9]{1,5})?$ ]] || return 1; if [[ "$1" == *:* ]]; then printf '%s' "$1"; else printf '%s:2398' "$1"; fi; }
+norm_cidr_list() { # "a, b/24 c" -> "a/32, b/24, c/32" (IPv4 only) ; 1 = invalid/empty
+	local x out="" i; x="$(echo "${1:-}" | tr ',' ' ' | tr -s '[:space:]' ' ')"
+	for i in $x; do
+		[[ "$i" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}(/[0-9]{1,2})?$ ]] || return 1
+		[[ "$i" == */* ]] || i="$i/32"; out+="${out:+, }$i"
+	done
+	[[ -n "$out" ]] && printf '%s' "$out"
+}
+valid_secret_list() { local i; [[ -n "${1:-}" ]] || return 1; for i in $1; do [[ "$i" =~ ^([0-9a-f]{32}|dd[0-9a-f]{32})$ ]] || return 1; done; }
+set_info() { [[ -f "$INFO_FILE" ]] || return 0; sed -i "/^$1=/d" "$INFO_FILE"; printf '%s="%s"\n' "$1" "$2" >> "$INFO_FILE"; }
+
+# front role: the relay may only talk to loopback (config validation + IPAddressAllow=localhost
+# in its unit), so a socket-activated systemd-socket-proxyd sits on 127.0.0.1:2398 and
+# forwards into the tunnel. The local MTProxy is parked (masked), not removed: `backend local`
+# brings it back without a rebuild.
+write_backend_units() { # <ip:port>
+	local target="$1" proxyd="" p
+	for p in /usr/lib/systemd/systemd-socket-proxyd /lib/systemd/systemd-socket-proxyd; do if [[ -x "$p" ]]; then proxyd="$p"; break; fi; done
+	[[ -n "$proxyd" ]] || { err "systemd-socket-proxyd не найден (пакет systemd)."; return 1; }
+	cat > "$BK_SOCKET" <<EOF
+[Unit]
+Description=Loopback endpoint for the remote MTProxy backend (tg-webproxy)
+
+[Socket]
+ListenStream=127.0.0.1:2398
+NoDelay=true
+Backlog=1024
+
+[Install]
+WantedBy=sockets.target
+EOF
+	cat > "$BK_SERVICE" <<EOF
+[Unit]
+Description=Forward loopback :2398 to the remote MTProxy backend ${target} (tg-webproxy)
+Requires=tgwp-backend.socket
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=${proxyd} --connections-max=8192 --exit-idle-time=10min ${target}
+PrivateTmp=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+EOF
+	chmod 0644 "$BK_SOCKET" "$BK_SERVICE"
+	systemctl daemon-reload
+}
+switch_backend_remote() { # <ip:port>
+	local target="$1" i
+	systemctl disable --now mtproxy.service refresh-mtproxy-config.timer >/dev/null 2>&1 || true
+	systemctl mask mtproxy.service >/dev/null 2>&1 || true
+	write_backend_units "$target" || return 1
+	systemctl enable --now tgwp-backend.socket >/dev/null 2>&1 || { err "Не удалось запустить tgwp-backend.socket"; return 1; }
+	systemctl restart tproxy-server.service
+	for i in 1 2 3 4 5; do probe_tcp "$target" && { ok "Backend $target отвечает через туннель."; return 0; }; sleep 1; done
+	warn "Backend $target пока недоступен: поднимите MTProxy на том хосте и проверьте туннель. Панель покажет, когда заработает."
+	return 0
+}
+switch_backend_local() {
+	systemctl disable --now tgwp-backend.socket tgwp-backend.service >/dev/null 2>&1 || true
+	rm -f "$BK_SOCKET" "$BK_SERVICE"; systemctl daemon-reload
+	systemctl unmask mtproxy.service >/dev/null 2>&1 || true
+	systemctl enable --now mtproxy.service refresh-mtproxy-config.timer >/dev/null 2>&1 || warn "MTProxy не стартовал — journalctl -u mtproxy"
+	systemctl restart tproxy-server.service
+}
+# backend role: only the tunnel may reach MTProxy. The rules live in the file upstream's
+# tproxy-firewall.service already applies (same table name), so mtproxy.service's
+# Requires=tproxy-firewall.service keeps working unchanged.
+write_backend_firewall() { # <"cidr, cidr">
+	mkdir -p /etc/tproxy-server
+	cat > "$UP_FW_NFT" <<EOF
+table inet tproxy_backend {
+	set allow4 { type ipv4_addr; flags interval; auto-merge; elements = { $1 } }
+	chain local_backend {
+		type filter hook input priority -10; policy accept;
+		iifname "lo" accept
+		tcp dport 2398 ip saddr @allow4 accept
+		tcp dport { 2398, 8888 } drop
+	}
+}
+EOF
+	chmod 0644 "$UP_FW_NFT"
+	nft -c -f "$UP_FW_NFT" >/dev/null 2>&1 || return 1
+	systemctl enable tproxy-firewall.service >/dev/null 2>&1 || true
+	systemctl restart tproxy-firewall.service
+}
+backend_upstream() { # <workers> <maxconn>  (inside run_logged): build MTProxy + install upstream units
+	export PATH="${STATE_DIR}/shim:${PATH}"
+	cd "$REPO_DIR" && ./deploy/install-mtproxy.sh
+	install -m 0644 deploy/mtproxy.service /etc/systemd/system/mtproxy.service
+	install -m 0644 deploy/tproxy-firewall.service /etc/systemd/system/tproxy-firewall.service
+	install -m 0644 deploy/refresh-mtproxy-config.service /etc/systemd/system/refresh-mtproxy-config.service
+	install -m 0644 deploy/refresh-mtproxy-config.timer /etc/systemd/system/refresh-mtproxy-config.timer
+	install -m 0755 deploy/refresh-mtproxy-config.sh /usr/local/sbin/refresh-mtproxy-config
+	install -d -o root -g root -m 0755 /etc/tproxy-server
+	printf 'MTPROXY_WORKERS=%s\nMTPROXY_MAX_CONNECTIONS=%s\n' "$1" "$2" > "$MTENV"
+	chown root:mtproxy "$MTENV"; chmod 0640 "$MTENV"
+	systemctl daemon-reload
+}
+
+do_install_backend() {
+	local PREV_SECRETS PREV_ALLOW PREV_ADTAG
+	PREV_SECRETS="$(prev_field SECRETS)"; PREV_ALLOW="$(prev_field ALLOW_FROM)"; PREV_ADTAG="$(prev_field ADTAG)"
+	head2 "1) Подготовка"
+	: > "$LOG"; chmod 0600 "$LOG"
+	run_logged "Зависимости (git, curl, nftables, vnstat)" "" install_prereqs \
+		|| die "apt-get не смог установить зависимости. Журнал: $LOG"
+	local PUBIP TUN_IF TUN_IP; PUBIP="$(detect_ip)"; TUN_IF="$(tunnel_iface || true)"; TUN_IP="$(tunnel_ip || true)"
+	if [[ -n "$TUN_IP" ]]; then ok "Туннель $TUN_IF: MTProxy будет доступен по ${GREEN}$TUN_IP:2398${NC}"
+	else warn "Интерфейс туннеля (wt0/wg0) не найден — поднимите NetBird или WireGuard, иначе front не достучится."; fi
+
+	head2 "2) Секреты — те же, что на front"
+	msg "На front их печатает ${GREEN}tgwebproxy link${NC}. Несколько — через пробел."
+	local SECRETS hint
+	if [[ -n "$PREV_SECRETS" ]]; then hint=" [Enter = оставить текущие]"; else hint=""; fi
+	while :; do
+		ask SECRETS "Секреты${hint}: " "$PREV_SECRETS" "${TGWP_SECRETS:-}" || true
+		SECRETS="$(echo "$SECRETS" | tr 'A-Z,' 'a-z ' | tr -s '[:space:]' ' ' | sed 's/^ //; s/ $//')"
+		valid_secret_list "$SECRETS" && break
+		err "Каждый секрет — 32 hex (можно с префиксом dd)."
+		[[ -n "${TGWP_SECRETS:-}" ]] && exit 2
+		[[ -z "$HAS_TTY" ]] && die "Нет терминала — задайте TGWP_SECRETS."
+	done
+	ok "Секретов: $(set -- $SECRETS; echo $#)"
+
+	head2 "3) Кому разрешено подключаться к MTProxy"
+	local ALLOW def_allow=""
+	[[ -n "$TUN_IF" ]] && def_allow="$(ip -4 -o addr show dev "$TUN_IF" 2>/dev/null | awk '{print $4; exit}')"
+	[[ -n "$PREV_ALLOW" ]] && def_allow="$PREV_ALLOW"
+	msg "IP или CIDR через запятую: IP front-хоста в туннеле или вся подсеть туннеля."
+	if [[ -n "$def_allow" ]]; then hint=" [Enter = $def_allow]"; else hint=""; fi
+	while :; do
+		ask ALLOW "Разрешить с${hint}: " "$def_allow" "${TGWP_ALLOW_FROM:-}" || true
+		ALLOW="$(norm_cidr_list "$ALLOW")" && break
+		err "Нужны IPv4-адреса или CIDR, например 100.64.0.7 или 100.64.0.0/10."
+		[[ -n "${TGWP_ALLOW_FROM:-}" ]] && exit 2
+		[[ -z "$HAS_TTY" ]] && die "Нет терминала — задайте TGWP_ALLOW_FROM."
+	done
+	ok "Разрешено с: $ALLOW"
+
+	head2 "4) Спонсорский канал (AD_TAG, необязательно)"
+	msg "Тег выдаёт @MTProxybot: /newproxy → адрес ${GREEN}<домен front>:443${NC} → секрет ${GREEN}${SECRETS%% *}${NC} → тег (32 hex)"
+	local ADTAG="${TGWP_ADTAG:-$PREV_ADTAG}"
+	[[ -z "${TGWP_ADTAG:-}" && -n "$ADTAG" ]] && msg "AD_TAG из прошлой установки: $ADTAG"
+	if [[ -z "$ADTAG" && -n "$HAS_TTY" ]] && confirm "Указать AD_TAG сейчас?"; then
+		ask ADTAG "AD_TAG (32 hex): " "" "" || true
+	fi
+	ADTAG="$(echo "$ADTAG" | tr 'A-Z' 'a-z' | tr -d '[:space:]')"
+	if [[ -n "$ADTAG" && ! "$ADTAG" =~ ^[0-9a-f]{32}$ ]]; then warn "AD_TAG не 32 hex — пропускаю."; ADTAG=""; fi
+	local WORKERS MAXCONN
+	WORKERS="${TGWP_WORKERS:-1}"; MAXCONN="${TGWP_MAXCONN:-4096}"
+	{ [[ "$WORKERS" =~ ^[1-9][0-9]*$ ]] && (( WORKERS <= 256 )); } || WORKERS=1
+	[[ "$MAXCONN" =~ ^[1-9][0-9]*$ ]] || MAXCONN=4096
+
+	head2 "5) Установка MTProxy"
+	fetch_repo
+	local REPO_REF; REPO_REF="$(git -C "$REPO_DIR" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+	mkdir -p "$STATE_DIR"
+	cat > "$INFO_FILE" <<EOF
+ROLE="backend"
+SECRETS="$SECRETS"
+ALLOW_FROM="$ALLOW"
+TUNNEL_IF="$TUN_IF"
+TUNNEL_IP="$TUN_IP"
+ADTAG="$ADTAG"
+WORKERS="$WORKERS"
+MAXCONN="$MAXCONN"
+PUBIP="$PUBIP"
+REPO_DIR="$REPO_DIR"
+REPO_REF="$REPO_REF"
+INSTALLED_AT="$(date '+%Y-%m-%d %H:%M:%S %Z')"
+EOF
+	chmod 0600 "$INFO_FILE"
+	install_mgmt_cli
+	[[ -d /opt/MTProxy/objs ]] && { chmod -R a+rX /opt/MTProxy 2>/dev/null || true; }
+	make_runuser_shim
+	rm -f "$ADTAG_DROPIN" "$MT_DROPIN"; systemctl daemon-reload 2>/dev/null || true
+	msg "Коммит tproxy-server: ${GREEN}$REPO_REF${NC}. Сборка MTProxy занимает пару минут; полный вывод: $LOG"
+	run_logged "Сборка MTProxy" install_phase backend_upstream "$WORKERS" "$MAXCONN" || { report_install_failure; exit 1; }
+	write_backend_firewall "$ALLOW" || die "Правила nftables не прошли проверку (nft -c -f $UP_FW_NFT)."
+	systemctl enable --now refresh-mtproxy-config.timer >/dev/null 2>&1 || true
+	head2 "6) Секреты${ADTAG:+ + AD_TAG}"
+	sync_mtproxy "$ADTAG" "$PUBIP" "$SECRETS" || ADTAG=""
+	systemctl enable mtproxy.service >/dev/null 2>&1 || true
+	verify_mtproxy_secrets "$SECRETS"
+	ok "Утилита управления установлена: ${GREEN}tgwebproxy${NC}"
+	print_result_backend "$TUN_IP" "$ALLOW" "$SECRETS" "$ADTAG"
+}
+print_result_backend() { # <tunnel_ip> <allow> <secrets> <adtag>
+	head2 "🎉 Backend готов: MTProxy слушает ${1:-<IP туннеля>}:2398"
+	echo -e "  Разрешено с: ${GREEN}$2${NC}"
+	echo -e "  Секретов: ${GREEN}$(set -- $3; echo $#)${NC}${4:+  ·  AD_TAG задан}"
+	echo
+	msg "На front-хосте: ${GREEN}tgwebproxy backend set ${1:-<IP туннеля>}:2398${NC}"
+	msg "или при установке front: роль front, backend ${1:-<IP туннеля>}:2398."
+	msg "Сменили тип подключения на front (tgwebproxy mode)? Здесь: ${GREEN}tgwebproxy secrets set '<секреты>'${NC}"
+	echo
+	echo -e "${BLUE}${BOLD}Управление:${NC} ${GREEN}tgwebproxy${NC} — меню; или status | secrets | allow | adtag | update | self-update | uninstall"
+}
+
 # ---------------------------------------------------------------- logged steps
 # Long/noisy commands (apt, make, go, upstream installer) write to $LOG; the
 # terminal gets ONE live line: spinner, step label, detected phase, elapsed.
@@ -159,7 +372,7 @@ run_logged() { # <label> <phase-fn|""> <cmd...>
 		trap 'kill "$pid" 2>/dev/null; pkill -TERM -P "$pid" 2>/dev/null; printf "\n"; exit 130' INT TERM
 		while kill -0 "$pid" 2>/dev/null; do
 			if [[ -n "$phasefn" ]]; then p="$("$phasefn")"; [[ -n "$p" ]] && ph="$p"; fi
-			printf '\r\033[K%s %s%s (%ds)' "${frames:i%10:1}" "$label" "${ph:+: $ph}" "$((SECONDS - start))"
+			printf '\r\033[K%s %s%s %s(%ds)%s' "${frames:i%10:1}" "$label" "${ph:+: $ph}" "$DIM" "$((SECONDS - start))" "$NC"
 			i=$((i + 1)); sleep 0.5
 		done
 		wait "$pid" || rc=$?
@@ -261,15 +474,40 @@ do_install() {
 	check_self_version
 
 	# Everything a previous install recorded becomes the Enter-default below.
-	local PREV_SECRET PREV_ADTAG PREV_HOST PREV_EMAIL PREV_MODE
+	local PREV_SECRET PREV_ADTAG PREV_HOST PREV_EMAIL PREV_MODE PREV_ROLE
 	PREV_SECRET="$(prev_field SECRET)"; PREV_ADTAG="$(prev_field ADTAG)"
-	PREV_HOST="$(prev_field HOSTNAME)"; PREV_EMAIL="$(prev_field EMAIL)"; PREV_MODE="$(prev_field MODE)"
+	PREV_HOST="$(prev_field HOSTNAME)"; PREV_EMAIL="$(prev_field EMAIL)"; PREV_MODE="$(prev_field MODE)"; PREV_ROLE="$(prev_field ROLE)"
 
 	if [[ -f "$INFO_FILE" ]]; then
-		warn "Похоже, WEB-прокси уже установлен: ${PREV_HOST:-?}, режим ${PREV_MODE:-https}, от $(prev_field INSTALLED_AT)."
+		warn "Похоже, уже установлен: роль ${PREV_ROLE:-single}${PREV_HOST:+, $PREV_HOST}, режим ${PREV_MODE:-https}, от $(prev_field INSTALLED_AT)."
 		msg  "Прошлые значения подставлены по умолчанию (Enter = оставить). Переустановка перезапишет"
 		msg  "config/Caddyfile, сайт в /srv/tproxy-site сохранится."
 		confirm "Продолжить переустановку?" || { msg "Отменено. Управление: ${GREEN}tgwebproxy${NC}"; exit 1; }
+	fi
+
+	# --- role -----------------------------------------------------------
+	head2 "0) Роль этого хоста"
+	msg "single — всё на одном хосте (по умолчанию)  ·  front — Caddy + relay, MTProxy на другом хосте  ·  backend — только MTProxy"
+	local ROLE
+	ask ROLE "Роль [single/front/backend] (Enter = ${PREV_ROLE:-single}): " "${PREV_ROLE:-single}" "${TGWP_ROLE:-}" || true
+	ROLE="$(echo "$ROLE" | tr 'A-Z' 'a-z' | tr -d '[:space:]')"
+	case "$ROLE" in single|front|backend) ;; "") ROLE=single ;; *) warn "Неизвестная роль '$ROLE' — использую single."; ROLE=single ;; esac
+	if [[ "$ROLE" == backend ]]; then do_install_backend; return 0; fi
+	ok "Роль: $ROLE"
+	local BACKEND="" TUN_IP=""
+	if [[ "$ROLE" == front ]]; then
+		TUN_IP="$(tunnel_ip || true)"
+		if [[ -n "$TUN_IP" ]]; then msg "IP этого хоста в туннеле: ${GREEN}$TUN_IP${NC} — его нужно разрешить на backend."
+		else warn "Интерфейс туннеля (wt0/wg0) не найден — поднимите NetBird или WireGuard до backend."; fi
+		local PREV_BK; PREV_BK="$(prev_field BACKEND)"
+		while :; do
+			ask BACKEND "MTProxy-хост в туннеле, ip[:port]${PREV_BK:+ [Enter = $PREV_BK]}: " "$PREV_BK" "${TGWP_BACKEND:-}" || true
+			BACKEND="$(norm_backend "$BACKEND")" && break
+			err "Нужен IPv4-адрес и порт, например 100.64.0.5:2398."
+			[[ -n "${TGWP_BACKEND:-}" ]] && exit 2
+			[[ -z "$HAS_TTY" ]] && die "Нет терминала — задайте TGWP_BACKEND."
+		done
+		ok "Backend: $BACKEND"
 	fi
 
 	# --- prereqs + public IP: needed to validate the domain right away --
@@ -350,7 +588,8 @@ do_install() {
 	warn "Для WEB-прокси показ спонсорского канала не гарантирован (подробности: tgwebproxy adtag)."
 	local ADTAG="${TGWP_ADTAG:-$PREV_ADTAG}"
 	[[ -z "${TGWP_ADTAG:-}" && -n "$ADTAG" ]] && msg "AD_TAG из прошлой установки: $ADTAG (сменить/убрать потом: tgwebproxy adtag)"
-	if [[ -z "$ADTAG" && -n "$HAS_TTY" ]]; then
+	if [[ "$ROLE" == front ]]; then msg "AD_TAG задаётся на backend-хосте, где работает MTProxy."; ADTAG=""
+	elif [[ -z "$ADTAG" && -n "$HAS_TTY" ]]; then
 		if confirm "Указать AD_TAG сейчас?"; then
 			ask ADTAG "AD_TAG (32 hex, /newproxy у @MTProxybot): " "" "" || true
 		fi
@@ -408,6 +647,7 @@ do_install() {
 	fetch_repo
 	local REPO_REF; REPO_REF="$(git -C "$REPO_DIR" rev-parse --short HEAD 2>/dev/null || echo unknown)"
 	write_info "$HOSTNAME" "$SECRET" "$EMAIL" "$ADTAG" "$WORKERS" "$MAXCONN" "$PUBIP" "$REPO_REF"
+	set_info ROLE "$ROLE"; set_info BACKEND "$BACKEND"; set_info TUNNEL_IP "$TUN_IP"
 	append_profiles_info "$MODE" "https:$SECRET"
 	install_mgmt_cli
 
@@ -468,9 +708,13 @@ do_install() {
 
 	# --- monitoring counters (persistent across reboots) ---------------
 	install_monitor || warn "Не удалось настроить счётчики nftables (мониторинг трафика частично недоступен)."
+	if [[ "$ROLE" == front ]]; then
+		head2 "10) Backend: relay → $BACKEND через туннель"
+		switch_backend_remote "$BACKEND" || die "Не удалось настроить проброс к backend."
+	fi
 
 	ok "Утилита управления установлена: ${GREEN}tgwebproxy${NC}"
-	print_result "$HOSTNAME" "$SECRET" "$ADTAG" "$PROFILE_LIST"
+	print_result "$HOSTNAME" "$SECRET" "$ADTAG" "$PROFILE_LIST" "$ROLE" "$BACKEND" "$TUN_IP"
 }
 
 # ---------------------------------------------------------------- prereqs
@@ -1098,8 +1342,8 @@ EOF
 }
 
 # ---------------------------------------------------------------- final output
-print_result() { # <hostname> <secret> <adtag> <profile_list>
-	local host="$1" secret="$2" adtag="$3" profiles="${4:-}"
+print_result() { # <hostname> <secret> <adtag> <profile_list> [role] [backend] [tunnel_ip]
+	local host="$1" secret="$2" adtag="$3" profiles="${4:-}" role="${5:-single}" backend="${6:-}" tun="${7:-}"
 	head2 "🎉 Готово — WEB-прокси развёрнут на https://$host/"
 	echo
 	echo -e "${YELLOW}${BOLD}Данные для клиента:${NC}"
@@ -1132,7 +1376,12 @@ print_result() { # <hostname> <secret> <adtag> <profile_list>
 	echo -e "  без path-scoped правил, request_body max_size и h3, таймауты не снижать; никакого CDN перед доменом;"
 	echo -e "  не объединяйте несколько таких доменов в один сертификат (CT свяжет их публично)."
 	echo
-	echo -e "${BLUE}${BOLD}Управление:${NC} ${GREEN}tgwebproxy${NC} — меню с живой панелью; или status | watch | link | mode | geo | adtag | update | self-update | uninstall | help"
+	if [[ "$role" == front ]]; then
+		echo -e "${YELLOW}${BOLD}Backend:${NC} relay ходит в ${GREEN}$backend${NC} через туннель. На backend-хосте выполните:"
+		echo -e "  ${GREEN}TGWP_ROLE=backend TGWP_SECRETS='$(secrets_of "${profiles:-https:$secret}")' TGWP_ALLOW_FROM=${tun:-<IP этого хоста в туннеле>} bash <(wget -qO- ${SCRIPT_URLS[0]})${NC}"
+		echo
+	fi
+	echo -e "${BLUE}${BOLD}Управление:${NC} ${GREEN}tgwebproxy${NC} — меню с живой панелью; или status | watch | link | mode | adtag | backend | update | self-update | uninstall | help"
 	msg "Проверка: ${GREEN}curl -fsS $RELAY_ADMIN/readyz${NC} → ready; ${GREEN}curl -fsS https://$host/${NC}"
 }
 
@@ -1147,20 +1396,22 @@ install_mgmt_cli() {
 set -uo pipefail
 export LC_ALL=C.UTF-8   # ${#str} must count characters, not bytes (Cyrillic labels)
 
-RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
-BLUE='\033[0;34m'; CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
+RED=$'\033[38;5;196m'; GREEN=$'\033[38;5;46m'; YELLOW=$'\033[38;5;214m'
+BLUE=$'\033[38;5;39m'; CYAN=$'\033[38;5;51m'; BOLD=$'\033[1m'; DIM=$'\033[38;5;245m'; NC=$'\033[0m'
 
 INFO_FILE="/opt/tgwebproxy/info.env"
 TGWP_VERSION="@VERSION@"                    # substituted by the installer
 SCRIPT_URLS=(@URLS@)                        # GitHub Pages, raw GitHub, jsDelivr
 VER_CACHE="/opt/tgwebproxy/version-check"   # "epoch version url", refreshed daily in background
+STATE_DIR="/opt/tgwebproxy"
+BK_SOCKET="/etc/systemd/system/tgwp-backend.socket"
+BK_SERVICE="/etc/systemd/system/tgwp-backend.service"
+UP_FW_NFT="/etc/tproxy-server/firewall.nft"
 MTENV="/etc/mtproxy/mtproxy.env"
 ADTAG_DROPIN="/etc/systemd/system/mtproxy.service.d/adtag.conf"   # legacy, removed on sight
 MT_DROPIN="/etc/systemd/system/mtproxy.service.d/tgwp.conf"      # the ONLY ExecStart override
 MON_UNIT="/etc/systemd/system/tgmon-counters.service"
 MON_NFT="/etc/tproxy-server/tgmon.nft"
-GEO_NFT="/etc/tgwp/geo.nft"
-GEO_UNIT="/etc/systemd/system/tgwp-geo.service"
 RELAY_ADMIN="http://127.0.0.1:8081"
 MTPROXY_STATS="http://127.0.0.1:8888"
 MON_TABLE="tgmon"
@@ -1178,6 +1429,9 @@ load_info(){
 	fi
 	# shellcheck disable=SC1090
 	source "$INFO_FILE"
+	ROLE="${ROLE:-single}"
+	[[ "$ROLE" == backend ]] && HOSTNAME=""   # bash's own $HOSTNAME must not leak into hints
+	return 0
 }
 
 h2h(){ local b="${1:-0}"
@@ -1228,6 +1482,104 @@ verify_mtproxy_secrets(){ local want got
 	elif systemctl is-active --quiet mtproxy.service; then ok "MTProxy запущен и принял $got секрет(ов)."
 	else warn "MTProxy сконфигурирован, но служба не активна — journalctl -u mtproxy -n 50"; fi; }
 
+
+# ---------------------------------------------------------------- split mode helpers
+tunnel_iface(){ local i; for i in wt0 wg0 nb0 tun0; do ip -4 -o addr show dev "$i" 2>/dev/null | grep -q inet && { printf '%s' "$i"; return 0; }; done; return 1; }
+tunnel_ip(){ local i; i="$(tunnel_iface)" || return 1; ip -4 -o addr show dev "$i" | awk '{print $4; exit}' | cut -d/ -f1; }
+probe_tcp(){ timeout 3 bash -c "exec 3<>/dev/tcp/${1%:*}/${1##*:}" 2>/dev/null; }
+norm_backend(){ [[ "${1:-}" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}(:[0-9]{1,5})?$ ]] || return 1; if [[ "$1" == *:* ]]; then printf '%s' "$1"; else printf '%s:2398' "$1"; fi; }
+norm_cidr_list(){ local x out="" i; x="$(echo "${1:-}" | tr ',' ' ' | tr -s '[:space:]' ' ')"
+	for i in $x; do [[ "$i" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}(/[0-9]{1,2})?$ ]] || return 1; [[ "$i" == */* ]] || i="$i/32"; out+="${out:+, }$i"; done
+	[[ -n "$out" ]] && printf '%s' "$out"; }
+valid_secret_list(){ local i; [[ -n "${1:-}" ]] || return 1; for i in $1; do [[ "$i" =~ ^([0-9a-f]{32}|dd[0-9a-f]{32})$ ]] || return 1; done; }
+set_info(){ sed -i "/^$1=/d" "$INFO_FILE"; printf '%s="%s"\n' "$1" "$2" >> "$INFO_FILE"; }
+secrets_list(){ if [[ "${ROLE:-single}" == backend ]]; then printf '%s' "${SECRETS:-}"; else secrets_of "${PROFILES:-https:${SECRET:-}}"; fi; }
+write_backend_units(){ local target="$1" proxyd="" p
+	for p in /usr/lib/systemd/systemd-socket-proxyd /lib/systemd/systemd-socket-proxyd; do if [[ -x "$p" ]]; then proxyd="$p"; break; fi; done
+	[[ -n "$proxyd" ]] || { err "systemd-socket-proxyd не найден (пакет systemd)."; return 1; }
+	printf '[Unit]\nDescription=Loopback endpoint for the remote MTProxy backend (tg-webproxy)\n\n[Socket]\nListenStream=127.0.0.1:2398\nNoDelay=true\nBacklog=1024\n\n[Install]\nWantedBy=sockets.target\n' > "$BK_SOCKET"
+	printf '[Unit]\nDescription=Forward loopback :2398 to the remote MTProxy backend %s (tg-webproxy)\nRequires=tgwp-backend.socket\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nExecStart=%s --connections-max=8192 --exit-idle-time=10min %s\nPrivateTmp=yes\nNoNewPrivileges=yes\nProtectSystem=strict\nProtectHome=yes\n' "$target" "$proxyd" "$target" > "$BK_SERVICE"
+	chmod 0644 "$BK_SOCKET" "$BK_SERVICE"; systemctl daemon-reload; }
+switch_backend_remote(){ local target="$1" i
+	systemctl disable --now mtproxy.service refresh-mtproxy-config.timer >/dev/null 2>&1 || true
+	systemctl mask mtproxy.service >/dev/null 2>&1 || true
+	write_backend_units "$target" || return 1
+	systemctl enable --now tgwp-backend.socket >/dev/null 2>&1 || { err "Не удалось запустить tgwp-backend.socket"; return 1; }
+	systemctl restart tproxy-server.service
+	for i in 1 2 3 4 5; do probe_tcp "$target" && { ok "Backend $target отвечает через туннель."; return 0; }; sleep 1; done
+	warn "Backend $target пока недоступен: поднимите MTProxy на том хосте и проверьте туннель."; return 0; }
+switch_backend_local(){
+	systemctl disable --now tgwp-backend.socket tgwp-backend.service >/dev/null 2>&1 || true
+	rm -f "$BK_SOCKET" "$BK_SERVICE"; systemctl daemon-reload
+	systemctl unmask mtproxy.service >/dev/null 2>&1 || true
+	systemctl enable --now mtproxy.service refresh-mtproxy-config.timer >/dev/null 2>&1 || warn "MTProxy не стартовал — journalctl -u mtproxy"
+	systemctl restart tproxy-server.service; }
+write_backend_firewall(){ # <"cidr, cidr">
+	mkdir -p /etc/tproxy-server
+	printf 'table inet tproxy_backend {\n\tset allow4 { type ipv4_addr; flags interval; auto-merge; elements = { %s } }\n\tchain local_backend {\n\t\ttype filter hook input priority -10; policy accept;\n\t\tiifname "lo" accept\n\t\ttcp dport 2398 ip saddr @allow4 accept\n\t\ttcp dport { 2398, 8888 } drop\n\t}\n}\n' "$1" > "$UP_FW_NFT"
+	chmod 0644 "$UP_FW_NFT"
+	nft -c -f "$UP_FW_NFT" >/dev/null 2>&1 || return 1
+	systemctl enable tproxy-firewall.service >/dev/null 2>&1 || true
+	systemctl restart tproxy-firewall.service; }
+
+# ---------------------------------------------------------------- split mode commands
+do_backend(){ # front: show | set <ip[:port]> | local
+	need_root backend; load_info
+	title "Backend — где работает MTProxy"
+	local t
+	case "${1:-show}" in
+		show)
+			if [[ "$ROLE" == front ]]; then
+				msg "Роль front  ·  relay → ${GREEN}${BACKEND:-?}${NC} через туннель  ·  IP этого хоста в туннеле: $(tunnel_ip || echo '?')"
+				if probe_tcp "${BACKEND:-0.0.0.0:0}"; then ok "Backend отвечает."; else warn "Backend недоступен: проверьте MTProxy и туннель на том хосте."; fi
+				msg "Вернуть MTProxy на этот хост: ${GREEN}tgwebproxy backend local${NC}"
+			elif [[ "$ROLE" == backend ]]; then msg "Это backend-хост: здесь работает MTProxy. Настройки: tgwebproxy secrets | allow."
+			else msg "MTProxy работает локально. Вынести на другой хост: ${GREEN}tgwebproxy backend set <ip[:port]>${NC}"; fi ;;
+		set)
+			[[ "$ROLE" == backend ]] && { err "Это backend-хост."; exit 1; }
+			t="$(norm_backend "${2:-}")" || { err "Нужен IPv4 и порт, например 100.64.0.5:2398"; exit 1; }
+			switch_backend_remote "$t" || exit 1
+			set_info ROLE front; set_info BACKEND "$t"; set_info TUNNEL_IP "$(tunnel_ip || true)"
+			ok "Relay теперь ходит в $t. Команда для backend-хоста: tgwebproxy link" ;;
+		local)
+			[[ "$ROLE" == front ]] || { msg "MTProxy и так локальный."; return 0; }
+			switch_backend_local; set_info ROLE single; set_info BACKEND ""; ok "MTProxy снова работает на этом хосте." ;;
+		*) err "Использование: tgwebproxy backend [show | set <ip[:port]> | local]"; exit 1 ;;
+	esac
+}
+do_secrets(){ # backend: show | set "<s1 s2 ...>"
+	need_root secrets; load_info
+	[[ "$ROLE" == backend ]] || { err "Секреты задаются на backend-хосте; на front их печатает tgwebproxy link."; exit 1; }
+	title "Секреты MTProxy — те же, что на front"
+	msg "Сейчас: ${SECRETS:-нет}"
+	local new
+	if [[ "${1:-}" == show ]]; then return 0
+	elif [[ $# -ge 1 ]]; then new="$*"
+	elif has_tty && read -r -p "Новые секреты через пробел (Enter — оставить): " new </dev/tty; then [[ -n "$new" ]] || return 0
+	else err "Нужен терминал или аргумент: tgwebproxy secrets set '<s1 s2>'"; exit 1; fi
+	new="${new#set }"
+	new="$(echo "$new" | tr 'A-Z,' 'a-z ' | tr -s '[:space:]' ' ' | sed 's/^ //; s/ $//')"
+	valid_secret_list "$new" || { err "Каждый секрет — 32 hex (можно с префиксом dd)."; exit 1; }
+	local natinfo=""; [[ -n "${ADTAG:-}" ]] && natinfo="$(compute_natinfo "${PUBIP:-}")"
+	local -a secs; read -r -a secs <<< "$new"
+	write_mtproxy_config "${ADTAG:-}" "$natinfo" "${secs[@]}"
+	systemctl restart mtproxy.service || warn "MTProxy не перезапустился — journalctl -u mtproxy"
+	set_info SECRETS "$new"; verify_mtproxy_secrets "$new"
+}
+do_allow(){ # backend: who may reach MTProxy :2398
+	need_root allow; load_info
+	[[ "$ROLE" == backend ]] || { err "Только для backend-хоста."; exit 1; }
+	title "Кому разрешено подключаться к MTProxy"
+	msg "Сейчас: ${ALLOW_FROM:-нет}  ·  IP этого хоста в туннеле: ${TUNNEL_IP:-?}"
+	local new
+	if [[ $# -ge 1 ]]; then new="$*"
+	elif has_tty && read -r -p "IP/CIDR через запятую (Enter — оставить): " new </dev/tty; then [[ -n "$new" ]] || return 0
+	else err "Нужен терминал или аргумент: tgwebproxy allow <ip/cidr,...>"; exit 1; fi
+	new="${new#set }"
+	new="$(norm_cidr_list "$new")" || { err "Нужны IPv4-адреса или CIDR, например 100.64.0.7 или 100.64.0.0/10."; exit 1; }
+	write_backend_firewall "$new" || { err "Правила не прошли проверку nft — ничего не изменено."; exit 1; }
+	set_info ALLOW_FROM "$new"; ok "Разрешено с: $new"
+}
 
 # ---------------------------------------------------------------- versioning
 ver_gt(){ [[ "$1" != "$2" && "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -n1)" == "$1" ]]; }
@@ -1280,146 +1632,11 @@ do_self_update(){ # re-generates this CLI from the newest published tg-webproxy.
 	rm -f "$tmp" "$VER_CACHE"
 	ok "tgwebproxy обновлён: $TGWP_VERSION → $rv (источник: $url)."; }
 
-# ---------------------------------------------------------------- SSH allowlist
-# Restricting port 443 by country is a NO-GO (see `tgwebproxy geo` output):
-# it breaks Let's Encrypt (multi-perspective validation is mandatory since
-# 2025-09-15 and has no IP allowlist), and a host that answers :80 worldwide
-# but refuses :443 from everywhere except one country is a UNIQUE signature —
-# the opposite of blending in. The censor doing active probing also sits
-# INSIDE the country you would allowlist. So only management access is fenced.
-#
-# Own table `inet tgfilter` (never touches upstream's tproxy_backend or tgmon),
-# policy accept with surgical DROPs so a bad list cannot lock you out of
-# everything, and DROP rather than REJECT (a timeout reads as a dead IP).
-ssh_ports(){ # every port sshd listens on — ssh-port.sh may have moved it off 22
-	local p; p="$(ss -Htlnp 2>/dev/null | awk '/"sshd"/{sub(/.*:/,"",$4); print $4}' | sort -un | paste -sd, -)"
-	[[ -z "$p" ]] && p="$(sshd -T 2>/dev/null | awk '$1=="port"{print $2}' | sort -un | paste -sd, -)"
-	printf '%s' "${p:-22}"; }
-do_geo(){
-	need_root geo
-	local ports; ports="$(ssh_ports)"
-	echo -e "${YELLOW}${BOLD}Ограничение доступа к SSH (порт(ы): ${ports})${NC}\n"
-	warn "Порты 80/443 НЕ ограничиваются и не должны: домен обязан выглядеть обычным сайтом."
-	msg  "Почему не гео-фильтр на 443:"
-	msg  "  • ломается выпуск/продление Let's Encrypt (проверка идёт с нескольких стран);"
-	msg  "  • хост, открытый на :80 всему миру и закрытый на :443 всем кроме одной страны,"
-	msg  "    становится уникально detectable — это ухудшает маскировку, а не улучшает;"
-	msg  "  • активный пробинг цензора идёт ИЗНУТРИ той же страны, которую вы разрешаете;"
-	msg  "  • домен и так опубликован в Certificate Transparency."
-	echo
-
-	local cur="${SSH_CLIENT:-}"; cur="${cur%% *}"
-	[[ -z "$cur" ]] && { cur="${SSH_CONNECTION:-}"; cur="${cur%% *}"; }
-	cur="${cur#::ffff:}"
-	[[ -n "$cur" ]] && msg "Ваш текущий SSH-адрес: ${GREEN}${cur}${NC}"
-
-	local input
-	if [[ $# -ge 1 ]]; then input="$(IFS=,; echo "$*")"
-	elif [[ -e /dev/tty ]] && read -r -p "Разрешить SSH с (IP/CIDR через запятую, код страны вида ru, или 'off'): " input </dev/tty; then :
-	else err "Нужен терминал или аргумент: tgwebproxy geo <ip/cidr[,...]|<cc>|off>"; exit 1; fi
-	input="$(echo "$input" | tr 'A-Z' 'a-z' | tr -d '[:space:]')"
-
-	if [[ "$input" == "off" || -z "$input" ]]; then
-		systemctl disable --now tgwp-geo.service 2>/dev/null || true
-		nft delete table inet tgfilter 2>/dev/null || true
-		rm -f "$GEO_UNIT" "$GEO_NFT"; systemctl daemon-reload 2>/dev/null || true
-		ok "Ограничение SSH снято."; return 0
-	fi
-
-	local v4="" v6="" item tmp fam url n list
-	local -a items; IFS=',' read -r -a items <<< "$input"
-	for item in "${items[@]}"; do
-		[[ -z "$item" ]] && continue
-		if [[ "$item" =~ ^[a-z]{2}$ ]]; then
-			msg "Загружаю списки сетей страны '$item' (IPv4 + IPv6)…"
-			for fam in 4 6; do
-				url="https://raw.githubusercontent.com/ipverse/country-ip-blocks/master/country/${item}/ipv${fam}-aggregated.txt"
-				tmp="$(mktemp)"
-				if ! curl -fsS --max-time 30 --proto '=https' "$url" -o "$tmp" 2>/dev/null; then
-					err "Не удалось скачать IPv${fam}-список для '$item'."; rm -f "$tmp"; continue
-				fi
-				if [[ $fam == 4 ]]; then list="$(grep -Ex '([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}' "$tmp" | paste -sd, -)"
-				else list="$(grep -Ex '[0-9a-f:]+/[0-9]{1,3}' "$tmp" | paste -sd, -)"; fi
-				rm -f "$tmp"
-				n="$(tr ',' '\n' <<< "$list" | grep -c . || true)"
-				if [[ "$n" -lt 8 ]]; then err "IPv${fam}-список '$item' подозрительно мал ($n) — пропускаю."; continue; fi
-				if [[ $fam == 4 ]]; then v4+="${v4:+, }$list"; else v6+="${v6:+, }$list"; fi
-				msg "  IPv${fam}: добавлено $n сетей"
-			done
-		elif [[ "$item" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}(/[0-9]{1,2})?$ ]]; then
-			[[ "$item" == */* ]] || item="${item}/32"
-			v4+="${v4:+, }${item}"
-		elif [[ "$item" == *:* ]]; then
-			[[ "$item" == */* ]] || item="${item}/128"
-			v6+="${v6:+, }${item}"
-		else
-			warn "Пропускаю нераспознанное значение: $item"
-		fi
-	done
-	[[ -z "$v4$v6" ]] && { err "Не набралось ни одной валидной сети — ничего не меняю."; exit 1; }
-	# Never lock the operator out: the address this session came from is always allowed.
-	if [[ "$cur" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then v4+="${v4:+, }${cur}/32"; msg "Ваш адрес ${cur} добавлен в список."
-	elif [[ "$cur" == *:* ]]; then v6+="${v6:+, }${cur}/128"; msg "Ваш адрес ${cur} добавлен в список."; fi
-	[[ -z "$v6" ]] && warn "IPv6-адресов в списке нет — SSH по IPv6 будет закрыт полностью."
-	[[ -z "$v4" ]] && warn "IPv4-адресов в списке нет — SSH по IPv4 будет закрыт полностью."
-
-	mkdir -p /etc/tgwp
-	{
-	echo "#!/usr/sbin/nft -f"
-	echo "add table inet tgfilter"
-	echo "delete table inet tgfilter"
-	echo "table inet tgfilter {"
-	[[ -n "$v4" ]] && echo "	set admin4 { type ipv4_addr; flags interval; auto-merge; elements = { $v4 } }"
-	[[ -n "$v6" ]] && echo "	set admin6 { type ipv6_addr; flags interval; auto-merge; elements = { $v6 } }"
-	echo "	chain input {"
-	echo "		type filter hook input priority -5; policy accept;"
-	echo "		iif lo accept"
-	echo "		ct state established,related accept"
-	# allowlist per family; a family with no allowed addresses is closed entirely
-	# (otherwise an IPv4-only list would leave SSH over IPv6 open to the world)
-	if [[ -n "$v4" ]]; then echo "		tcp dport { $ports } ct state new ip saddr != @admin4 counter drop"
-	else echo "		tcp dport { $ports } ct state new meta nfproto ipv4 counter drop"; fi
-	if [[ -n "$v6" ]]; then echo "		tcp dport { $ports } ct state new ip6 saddr != @admin6 counter drop"
-	else echo "		tcp dport { $ports } ct state new meta nfproto ipv6 counter drop"; fi
-	echo "		# 80/443 deliberately untouched"
-	echo "	}"
-	echo "}"
-	} > "$GEO_NFT"
-	chmod 0644 "$GEO_NFT"
-
-	if ! nft -c -f "$GEO_NFT" >/dev/null 2>&1; then
-		err "Правила не прошли проверку nft — ничего не применено."
-		nft -c -f "$GEO_NFT" 2>&1 | head -5 | sed 's/^/    /'
-		rm -f "$GEO_NFT"; exit 1
-	fi
-
-	cat > "$GEO_UNIT" <<EOF
-[Unit]
-Description=SSH allowlist for the Telegram WEB proxy host
-After=nftables.service
-PartOf=nftables.service
-
-[Service]
-Type=oneshot
-RemainAfterExit=true
-ExecStart=/usr/sbin/nft -f $GEO_NFT
-ExecReload=/usr/sbin/nft -f $GEO_NFT
-ExecStop=-/usr/sbin/nft delete table inet tgfilter
-
-[Install]
-WantedBy=multi-user.target
-EOF
-	systemctl daemon-reload
-	systemctl enable --now tgwp-geo.service >/dev/null 2>&1 || { err "Не удалось применить."; exit 1; }
-	ok "SSH ограничен (порты: ${ports}). Правила переживут перезагрузку."
-	[[ -n "$cur" ]] && msg "Проверьте НОВЫМ соединением, не закрывая текущее: ssh ${cur} → должно работать."
-	warn "Если потеряете доступ — снять через консоль провайдера: nft delete table inet tgfilter"
-}
-
 show_link(){
 	need_root link; load_info
+	[[ "$ROLE" == backend ]] && { err "Ссылки печатает front-хост (там домен и relay)."; exit 1; }
 	update_notice
-	echo -e "${YELLOW}${BOLD}Ссылки подключения:${NC}"
+	title "Ссылки подключения"
 	local p m s
 	for p in ${PROFILES:-https:$SECRET}; do
 		m="${p%%:*}"; s="${p#*:}"
@@ -1432,13 +1649,19 @@ show_link(){
 	echo -e "  Добавить прокси → ${BOLD}WEB${NC} → Hostname: ${GREEN}$HOSTNAME${NC}, Secret: ${GREEN}$SECRET${NC}"
 	echo
 	warn "Нужен клиент с поддержкой WEB-прокси: Desktop ≥ 7.1.1 или Android beta 12.10.2+."
+	if [[ "$ROLE" == front ]]; then
+		echo; echo -e "${YELLOW}${BOLD}Backend-хост${NC} (${BACKEND:-?}) — установка или обновление секретов там:"
+		echo -e "  ${GREEN}TGWP_ROLE=backend TGWP_SECRETS='$(secrets_list)' TGWP_ALLOW_FROM=${TUNNEL_IP:-<IP этого хоста в туннеле>} bash <(wget -qO- ${SCRIPT_URLS[0]})${NC}"
+		echo -e "  уже установлен: ${GREEN}tgwebproxy secrets set '$(secrets_list)'${NC}"
+	fi
 }
 
 # Switch the carrier mode (transport) after installation.
 do_mode(){
 	need_root mode; load_info
+	[[ "$ROLE" == backend ]] && { err "Тип подключения меняется на front-хосте."; exit 1; }
 	local pf="/etc/tproxy-server/profiles.json"
-	echo -e "${YELLOW}${BOLD}Тип подключения (carrier mode)${NC}\n"
+	title "Тип подключения (carrier mode)"
 	msg "Текущий: ${MODE:-https}"
 	echo -e "  ${BOLD}https${NC}           — один POST + long-poll, консервативный дефолт"
 	echo -e "  ${BOLD}https-lanes${NC}     — своя пара запросов на поток, ниже задержки (нужен HTTP/2)"
@@ -1493,46 +1716,99 @@ do_mode(){
 	echo; show_link
 }
 
-# ---------------------------------------------------------------- dashboard
+# ---------------------------------------------------------------- ui helpers
+W=78                                    # panel width (columns)
+vlen(){ local s; s="$(printf '%s' "$1" | sed 's/\x1b\[[0-9;]*m//g')"; printf '%s' "${#s}"; }   # visible length
+pad(){ local n; n="$(vlen "$1")"; if (( n >= $2 )); then printf '%s' "$1"; else printf '%s%*s' "$1" "$(( $2 - n ))" ''; fi; }
+lr(){ local n; n=$(( ${3:-$W} - $(vlen "$1") - $(vlen "$2") )); (( n < 1 )) && n=1; printf '%s%*s%s' "$1" "$n" '' "$2"; }
+hr(){ local s; printf -v s '%*s' "${1:-$W}" ''; printf '%s' "${s// /─}"; }
+box(){ local l; printf '%s╭%s╮%s\n' "$DIM" "$(hr $((W-2)))" "$NC"
+	for l in "$@"; do printf '%s│%s %s %s│%s\n' "$DIM" "$NC" "$(pad "$l" $((W-4)))" "$DIM" "$NC"; done
+	printf '%s╰%s╯%s\n' "$DIM" "$(hr $((W-2)))" "$NC"; }
+two(){ printf '  %s%s\n' "$(pad "$1" 38)" "$2"; }
+three(){ printf '  %s%s%s\n' "$(pad "$1" 26)" "$(pad "$2" 26)" "$3"; }
+title(){ printf '\n  %s%s%s\n  %s%s%s\n\n' "${CYAN}${BOLD}" "$1" "$NC" "$DIM" "$(hr "$(vlen "$1")")" "$NC"; }
+dot(){ local st; st="$(systemctl is-active "$1" 2>/dev/null)" || true
+	if [[ "$st" == active ]]; then printf '%s' "${GREEN}●${NC} $2"; else printf '%s' "${RED}○${NC} $2 ${DIM}${st:-?}${NC}"; fi; }
+short_tag(){ local t="${1:-}"; if [[ ${#t} -gt 12 ]]; then printf '%s…%s' "${t:0:8}" "${t: -4}"; else printf '%s' "$t"; fi; }
 METRICS=""     # /metrics snapshot, taken once per render
 metric_of(){ awk -v n="$1" '$1==n{print $2; exit}' <<< "$METRICS"; }
-row(){ local pad=$((13 - ${#1})); (( pad < 2 )) && pad=2; printf '  %s%*s' "$1" "$pad" ''; echo -e "$2"; }
-dot(){ # <unit> <short name> -> coloured bullet
-	local st; st="$(systemctl is-active "$1" 2>/dev/null)" || true
-	if [[ "$st" == active ]]; then printf '%s' "${GREEN}●${NC} $2"; else printf '%s' "${RED}○${NC} $2(${st:-?})"; fi; }
-short_tag(){ local t="${1:-}"; if [[ ${#t} -gt 12 ]]; then printf '%s…%s' "${t:0:8}" "${t: -4}"; else printf '%s' "$t"; fi; }
-dashboard(){ # compact one-screen status; status, watch and the menu all render this
-	local hz rz s pair t IF vn upd sl st sc sr df mtc ti to
+nprof(){ set -- ${PROFILES:-x}; echo $#; }
+vshort(){ awk 'NF>=2{printf "%.0f %s", $1, $2; next}{printf "%s", $0}' <<< "${1:-}"; }   # "428.83 MiB" -> "429 MiB"
+
+# ---------------------------------------------------------------- dashboard
+dashboard(){ # one screen: header box with a verdict, then two-column sections
+	if [[ "${ROLE:-single}" == backend ]]; then dashboard_backend; return 0; fi
+	local hz rz bad="" u n sl st sr mtc ti to IF vn upd drx dtx mrx mtx adt
 	METRICS="$(curl -fsS --max-time 2 "$RELAY_ADMIN/metrics" 2>/dev/null || true)"
-	if curl -fsS --max-time 2 "$RELAY_ADMIN/healthz" >/dev/null 2>&1; then hz="${GREEN}ok${NC}"; else hz="${RED}fail${NC}"; fi
-	if curl -fsS --max-time 2 "$RELAY_ADMIN/readyz"  >/dev/null 2>&1; then rz="${GREEN}ready${NC}"; else rz="${RED}503 — MTProxy недоступен${NC}"; fi
+	if curl -fsS --max-time 2 "$RELAY_ADMIN/healthz" >/dev/null 2>&1; then hz="${GREEN}ok${NC}"; else hz="${RED}fail${NC}"; bad+="${bad:+, }healthz"; fi
+	if curl -fsS --max-time 2 "$RELAY_ADMIN/readyz"  >/dev/null 2>&1; then rz="${GREEN}ready${NC}"; else rz="${RED}503${NC}"; bad+="${bad:+, }readyz"; fi
+	local units="caddy:caddy tproxy-server:relay mtproxy:mtproxy tproxy-firewall:firewall refresh-mtproxy-config.timer:refresh" mtdot bkrow=""
+	if [[ "$ROLE" == front ]]; then
+		units="caddy:caddy tproxy-server:relay tgwp-backend.socket:backend tproxy-firewall:firewall"
+		mtdot="$(dot tgwp-backend.socket backend)"
+		if probe_tcp "${BACKEND:-0.0.0.0:0}"; then bkrow="backend     ${BACKEND}  ${GREEN}● туннель ok${NC}"; else bkrow="backend     ${BACKEND:-?}  ${RED}○ недоступен${NC}"; bad+="${bad:+, }backend"; fi
+	else mtdot="$(dot mtproxy mtproxy)"; fi
+	for u in $units; do
+		n="${u#*:}"; u="${u%%:*}"; systemctl is-active --quiet "$u" >/dev/null 2>&1 || bad+="${bad:+, }$n"
+	done
 	refresh_version_cache; upd="$(cached_newer)"
-	echo -e "${BLUE}${BOLD}Telegram WEB Proxy${NC}  ·  tgwebproxy ${TGWP_VERSION}${upd:+  ·  ${YELLOW}доступна $upd → tgwebproxy self-update${NC}}"
-	row "Домен"       "${GREEN}${HOSTNAME:-?}${NC}"
-	row "Установлен"  "${INSTALLED_AT:-?}  ·  relay ${REPO_REF:-?}"
-	row "Транспорт"   "${MODE:-https}  ·  профилей $(set -- ${PROFILES:-x}; echo $#)${ADTAG:+  ·  AD_TAG $(short_tag "$ADTAG")}"
-	s=""; for pair in caddy:caddy tproxy-server:relay mtproxy:mtproxy tproxy-firewall:firewall refresh-mtproxy-config.timer:refresh-timer; do
-		s+="$(dot "${pair%%:*}" "${pair#*:}")   "; done
-	row "Службы"      "$s"
-	sl="$(metric_of tproxy_sessions_live)"; st="$(metric_of tproxy_streams_live)"; sc="$(metric_of tproxy_sessions_created_total)"
-	sr="$(metric_of tproxy_streams_rejected_total)"; df="$(metric_of tproxy_backend_dial_failures_total)"
-	row "Relay"       "healthz $hz  ·  readyz $rz"
-	row "Сессии"      "живых ${sl:-?}  ·  стримов ${st:-?}  ·  создано ${sc:-?}  ·  отказов ${sr:-0}  ·  dial-ошибок ${df:-0}"
+	local verdict; if [[ -z "$bad" ]]; then verdict="${GREEN}● работает${NC}"; else verdict="${RED}○ проблемы: ${bad}${NC}"; fi
+	box "$(lr "${CYAN}${BOLD}TELEGRAM WEB PROXY${NC}" "tgwebproxy ${TGWP_VERSION}${upd:+ ${YELLOW}→ ${upd}${NC}}" $((W-4)))" \
+	    "$(lr "${GREEN}${HOSTNAME:-?}${NC}" "$verdict" $((W-4)))"
+	sl="$(metric_of tproxy_sessions_live)"; st="$(metric_of tproxy_streams_live)"; sr="$(metric_of tproxy_streams_rejected_total)"
 	mtc="$(mtstat total_special_connections)"
-	row "Подключения" "клиенты→caddy $(conns sport 443)  ·  caddy→relay $(conns sport 8080)  ·  relay→mtproxy $(conns dport 2398)${mtc:+  ·  MTProxy users $mtc}"
+	echo
+	two "${BLUE}${BOLD}СЛУЖБЫ${NC}"                                                         "${BLUE}${BOLD}ПОДКЛЮЧЕНИЯ${NC}"
+	two "$(dot caddy caddy)   $(dot tproxy-server relay)   $mtdot"    "клиенты → caddy      $(conns sport 443)"
+	if [[ "$ROLE" == front ]]; then two "$(dot tproxy-firewall firewall)" "caddy → relay        $(conns sport 8080)"
+	else two "$(dot tproxy-firewall firewall)   $(dot refresh-mtproxy-config.timer refresh)" "caddy → relay        $(conns sport 8080)"; fi
+	two "relay: healthz $hz  ·  readyz $rz"                                          "relay → mtproxy      $(conns dport 2398)"
+	two ""                                                                           "сессий ${sl:-?}  ·  стримов ${st:-?}  ·  отказов ${sr:-0}${mtc:+  ·  users $mtc}"
 	ensure_monitor; ti="$(nft_bytes tls_in)"; to="$(nft_bytes tls_out)"
-	t="relay ↑$(h2h "$(metric_of tproxy_bytes_up_total)") ↓$(h2h "$(metric_of tproxy_bytes_down_total)")"
-	[[ -n "$ti$to" ]] && t+="  ·  :443 вход $(h2h "${ti:-0}") выход $(h2h "${to:-0}")"
-	row "Трафик"      "$t"
 	IF="$(ip -4 route show default 2>/dev/null | awk '{print $5; exit}')"
+	drx=""; dtx=""; mrx=""; mtx=""
 	if [[ -n "$IF" ]] && command -v vnstat >/dev/null 2>&1; then
 		vn="$(vnstat --oneline -i "$IF" 2>/dev/null || true)"
-		if [[ "$vn" == 1\;* ]]; then
-			local drx dtx mrx mtx arx atx
-			IFS=';' read -r _ _ _ drx dtx _ _ _ mrx mtx _ _ arx atx _ <<< "$vn"
-			row "Сеть $IF"   "сегодня rx $drx tx $dtx  ·  месяц rx $mrx tx $mtx  ·  всего rx $arx tx $atx"
-		fi
+		[[ "$vn" == 1\;* ]] && IFS=';' read -r _ _ _ drx dtx _ _ _ mrx mtx _ <<< "$vn"
+		drx="$(vshort "$drx")"; dtx="$(vshort "$dtx")"; mrx="$(vshort "$mrx")"; mtx="$(vshort "$mtx")"
 	fi
+	if [[ -n "${ADTAG:-}" ]]; then adt="$(short_tag "$ADTAG")"; else adt="${DIM}нет${NC}"; fi
+	echo
+	two "${BLUE}${BOLD}ТРАФИК${NC}"                                                         "${BLUE}${BOLD}НАСТРОЙКИ${NC}"
+	two "relay     ↑ $(h2h "$(metric_of tproxy_bytes_up_total)")   ↓ $(h2h "$(metric_of tproxy_bytes_down_total)")" "транспорт   ${MODE:-https}  ${DIM}($(nprof) проф.)${NC}"
+	two ":443      вход $(h2h "${ti:-0}")   выход $(h2h "${to:-0}")"                 "AD_TAG      $adt"
+	two "$(printf '%-9s' "${IF:-net}") сегодня ${drx:-?} / ${dtx:-?}"               "relay       ${REPO_REF:-?}  ${DIM}от ${INSTALLED_AT%% *}${NC}"
+	two "          месяц   ${mrx:-?} / ${mtx:-?}"                                    "$bkrow"
+}
+
+dashboard_backend(){ # backend role: MTProxy only
+	local bad="" u n mtc upd adt IF vn drx dtx trx ttx verdict
+	for u in mtproxy:mtproxy tproxy-firewall:firewall refresh-mtproxy-config.timer:refresh; do
+		n="${u#*:}"; u="${u%%:*}"; systemctl is-active --quiet "$u" >/dev/null 2>&1 || bad+="${bad:+, }$n"
+	done
+	refresh_version_cache; upd="$(cached_newer)"
+	if [[ -z "$bad" ]]; then verdict="${GREEN}● работает${NC}"; else verdict="${RED}○ проблемы: ${bad}${NC}"; fi
+	box "$(lr "${CYAN}${BOLD}TELEGRAM WEB PROXY${NC}  ${DIM}backend${NC}" "tgwebproxy ${TGWP_VERSION}${upd:+ ${YELLOW}→ ${upd}${NC}}" $((W-4)))" \
+	    "$(lr "${GREEN}MTProxy ${TUNNEL_IP:-?}:2398${NC}  ${DIM}(${TUNNEL_IF:-туннель})${NC}" "$verdict" $((W-4)))"
+	mtc="$(mtstat total_special_connections)"
+	if [[ -n "${ADTAG:-}" ]]; then adt="$(short_tag "$ADTAG")"; else adt="${DIM}нет${NC}"; fi
+	drx=""; dtx=""; trx=""; ttx=""
+	IF="$(ip -4 route show default 2>/dev/null | awk '{print $5; exit}')"
+	if command -v vnstat >/dev/null 2>&1; then
+		[[ -n "$IF" ]] && { vn="$(vnstat --oneline -i "$IF" 2>/dev/null || true)"; [[ "$vn" == 1\;* ]] && IFS=';' read -r _ _ _ drx dtx _ <<< "$vn"; }
+		[[ -n "${TUNNEL_IF:-}" ]] && { vn="$(vnstat --oneline -i "$TUNNEL_IF" 2>/dev/null || true)"; [[ "$vn" == 1\;* ]] && IFS=';' read -r _ _ _ trx ttx _ <<< "$vn"; }
+	fi
+	echo
+	two "${BLUE}${BOLD}СЛУЖБЫ${NC}"                                                        "${BLUE}${BOLD}ПОДКЛЮЧЕНИЯ${NC}"
+	two "$(dot mtproxy mtproxy)   $(dot tproxy-firewall firewall)   $(dot refresh-mtproxy-config.timer refresh)" "front → mtproxy      $(conns sport 2398)"
+	two ""                                                                          "users MTProxy        ${mtc:-?}"
+	echo
+	two "${BLUE}${BOLD}ТРАФИК${NC}"                                                        "${BLUE}${BOLD}НАСТРОЙКИ${NC}"
+	two "$(printf '%-9s' "${TUNNEL_IF:-tun}") сегодня $(vshort "$trx") / $(vshort "$ttx")"   "секретов    $(set -- ${SECRETS:-}; echo $#)"
+	two "$(printf '%-9s' "${IF:-net}") сегодня $(vshort "$drx") / $(vshort "$dtx")"          "разрешено   ${ALLOW_FROM:-?}"
+	two ""                                                                          "AD_TAG      $adt"
+	two ""                                                                          "MTProxy     ${REPO_REF:-?}  ${DIM}от ${INSTALLED_AT%% *}${NC}"
 }
 
 show_status(){ # [--full]
@@ -1554,7 +1830,7 @@ do_watch(){ # live dashboard; q or Ctrl-C returns
 	local key STOP=""; trap 'STOP=1' INT
 	while [[ -z "$STOP" ]]; do
 		printf '\033[H\033[2J'; load_info; dashboard
-		printf '\n  %bq%b — выход  ·  обновление каждые 2 с ' "$BOLD" "$NC"
+		printf '\n  %sq%s %s— выход · обновление каждые 2 с%s ' "$BOLD" "$NC" "$DIM" "$NC"
 		key=""; read -r -n1 -t 2 key </dev/tty 2>/dev/null || true
 		[[ "$key" == [qQ] ]] && break
 	done
@@ -1562,12 +1838,13 @@ do_watch(){ # live dashboard; q or Ctrl-C returns
 }
 
 # ---------------------------------------------------------------- interactive menu
-pause(){ printf '\n  %bEnter%b — назад в меню ' "$BOLD" "$NC"; read -r _ </dev/tty 2>/dev/null || true; }
+pause(){ printf '\n  %s↵ Enter — назад в меню%s ' "$DIM" "$NC"; read -r _ </dev/tty 2>/dev/null || true; }
 run_sub(){ # run an action in a subshell: Ctrl-C or `exit` inside it returns to the menu
 	trap ' ' INT
 	( trap - INT; "$@" ) || true
 	trap 'printf "\n"; exit 0' INT
 }
+K="${YELLOW}${BOLD}"   # hotkey colour
 menu(){
 	need_root menu; has_tty || { err "Нужен терминал: используйте tgwebproxy status | link | …"; exit 1; }
 	local key a
@@ -1575,44 +1852,68 @@ menu(){
 	while :; do
 		load_info; printf '\033[H\033[2J'; dashboard
 		echo
-		echo -e "  ${BOLD}1${NC} Подробный статус     ${BOLD}2${NC} Живой монитор      ${BOLD}3${NC} Ссылки              ${BOLD}4${NC} Тип подключения"
-		echo -e "  ${BOLD}5${NC} AD_TAG               ${BOLD}6${NC} Доступ по SSH      ${BOLD}7${NC} Журналы             ${BOLD}8${NC} Перезапуск служб"
-		echo -e "  ${BOLD}9${NC} Обновить relay       ${BOLD}v${NC} Версия / утилита   ${BOLD}d${NC} Удалить             ${BOLD}q${NC} Выход"
-		printf '\n  Клавиша (панель обновляется каждые 5 с): '
+		if [[ "$ROLE" == backend ]]; then
+		three "${BLUE}${BOLD}НАСТРОЙКИ${NC}"             "${BLUE}${BOLD}ОБСЛУЖИВАНИЕ${NC}"          "${BLUE}${BOLD}УТИЛИТА${NC}"
+		three "${K}1${NC}  Секреты (с front)"     "${K}4${NC}  Перезапуск MTProxy"    "${K}7${NC}  Обновить утилиту"
+		three "${K}2${NC}  Кому разрешено"        "${K}5${NC}  Журналы"               "${K}8${NC}  Удалить"
+		three "${K}3${NC}  AD_TAG"                "${K}6${NC}  Обновить MTProxy"      "${K}0${NC}  Выход"
+		else
+		three "${BLUE}${BOLD}ПОДКЛЮЧЕНИЕ${NC}"           "${BLUE}${BOLD}ОБСЛУЖИВАНИЕ${NC}"          "${BLUE}${BOLD}УТИЛИТА${NC}"
+		three "${K}1${NC}  Ссылки"                "${K}4${NC}  Перезапуск служб"      "${K}7${NC}  Обновить утилиту"
+		three "${K}2${NC}  Тип подключения"       "${K}5${NC}  Журналы"               "${K}8${NC}  Удалить"
+		three "${K}3${NC}  AD_TAG"                "${K}6${NC}  Обновить relay"        "${K}0${NC}  Выход"
+		three "${K}b${NC}  Backend-хост"          ""                                  ""
+		fi
+		echo
+		three "${K}s${NC}  Подробный статус"      "${K}w${NC}  Живой монитор"         ""
+		printf '\n  %s›%s %sклавиша · панель обновляется сама%s ' "$BOLD" "$NC" "$DIM" "$NC"
 		key=""; read -r -n1 -t 5 key </dev/tty 2>/dev/null || { [[ -n "$key" ]] || continue; }
 		echo
 		case "$key" in
-			1) run_sub show_status --full; pause ;;
-			2) run_sub do_watch ;;
-			3) run_sub show_link; pause ;;
-			4) run_sub do_mode; pause ;;
-			5) run_sub do_adtag; pause ;;
-			6) run_sub do_geo; pause ;;
-			7) msg "Ctrl-C — вернуться в меню"; run_sub do_logs ;;
-			8) run_sub do_restart; pause ;;
-			9) run_sub do_update; pause ;;
-			v|V) run_sub show_version
-			     a=""; read -r -p "  Обновить утилиту сейчас? [y/N]: " a </dev/tty 2>/dev/null || true
-			     if [[ "$a" == [yYдД]* ]]; then
+			1) if [[ "$ROLE" == backend ]]; then run_sub do_secrets; else run_sub show_link; fi; pause ;;
+			2) if [[ "$ROLE" == backend ]]; then run_sub do_allow; else run_sub do_mode; fi; pause ;;
+			b|B) run_sub do_backend; pause ;;
+			3) run_sub do_adtag; pause ;;
+			4) run_sub do_restart; pause ;;
+			5) msg "Ctrl-C — вернуться в меню"; run_sub do_logs ;;
+			6) run_sub do_update; pause ;;
+			7) run_sub show_version
+			   a=""; read -r -p "  Обновить утилиту сейчас? [y/N]: " a </dev/tty 2>/dev/null || true
+			   if [[ "$a" == [yYдД]* ]]; then
 				run_sub do_self_update; msg "Запустите tgwebproxy заново, чтобы работать в новой версии."; pause; exit 0
-			     fi ;;
-			d|D) run_sub do_uninstall; [[ -x /usr/local/bin/tgwebproxy ]] || exit 0; pause ;;
-			q|Q) echo; exit 0 ;;
+			   fi ;;
+			8) run_sub do_uninstall; [[ -x /usr/local/bin/tgwebproxy ]] || exit 0; pause ;;
+			s|S) run_sub show_status --full; pause ;;
+			w|W) run_sub do_watch ;;
+			0|q|Q) echo; exit 0 ;;
 		esac
 	done
 }
 
-do_logs(){ need_root logs; journalctl -u tproxy-server -u mtproxy -u caddy -f --no-pager; }
+do_logs(){ need_root logs; load_info
+	case "$ROLE" in backend) journalctl -u mtproxy -u tproxy-firewall -f --no-pager ;;
+		front) journalctl -u tproxy-server -u tgwp-backend -u caddy -f --no-pager ;;
+		*) journalctl -u tproxy-server -u mtproxy -u caddy -f --no-pager ;; esac; }
 
 do_restart(){
-	need_root restart
+	need_root restart; load_info
 	msg "Перезапуск (клиентские сессии переподключатся автоматически)…"
-	systemctl restart mtproxy.service tproxy-server.service caddy.service
+	case "$ROLE" in backend) systemctl restart mtproxy.service ;;
+		front) systemctl restart tgwp-backend.service tproxy-server.service caddy.service ;;
+		*) systemctl restart mtproxy.service tproxy-server.service caddy.service ;; esac
 	ok "Перезапущено."; show_status
 }
 
 do_update(){
 	need_root update; load_info
+	if [[ "$ROLE" == backend ]]; then
+		msg "Обновляю репозиторий и MTProxy (пересборка только при смене закреплённого коммита)…"
+		git -C "$REPO_DIR" pull --ff-only 2>/dev/null || warn "git pull не удался — использую текущую версию."
+		if ( export PATH="$STATE_DIR/shim:$PATH"; cd "$REPO_DIR" && ./deploy/install-mtproxy.sh ) >> /var/log/tgwebproxy-install.log 2>&1; then
+			chmod -R a+rX /opt/MTProxy 2>/dev/null || true; systemctl restart mtproxy.service && ok "MTProxy обновлён." || err "MTProxy не перезапустился — journalctl -u mtproxy"
+		else err "Обновление не удалось — /var/log/tgwebproxy-install.log"; fi
+		return 0
+	fi
 	[[ -x "${REPO_DIR:-/opt/tproxy-server-src}/deploy/update-relay.sh" ]] \
 		|| { err "Нет ${REPO_DIR}/deploy/update-relay.sh"; exit 1; }
 	msg "Обновляю репозиторий и relay (с авто-откатом при неудаче)…"
@@ -1626,13 +1927,13 @@ do_update(){
 
 do_adtag(){
 	need_root adtag; load_info
-	echo -e "${YELLOW}${BOLD}AD_TAG — спонсорский канал${NC}\n"
-	warn "Для WEB-прокси показ спонсорского канала не гарантирован: MTProxy видит клиентов как 127.0.0.1 (relay),"
-	warn "атрибуция по IP теряется, а стек апстрима это не тестирует."
+	[[ "$ROLE" == front ]] && { err "AD_TAG задаётся на backend-хосте, где работает MTProxy."; exit 1; }
+	title "AD_TAG — спонсорский канал"
+	warn "Для WEB-прокси показ канала не гарантирован: MTProxy видит клиентов как 127.0.0.1, атрибуция по IP теряется."
 	echo
 	local bsec="${SECRET:-}"; bsec="${bsec#dd}"
 	msg "Как получить тег (работающий прокси не нужен): @MTProxybot → /newproxy →"
-	msg "  адрес ${GREEN}${HOSTNAME:-<домен>}:443${NC} → секрет ${GREEN}${bsec}${NC} → тег (32 hex)."
+	msg "  адрес ${GREEN}${HOSTNAME:-<домен front>}:443${NC} → секрет ${GREEN}${bsec:-$(secrets_list | cut -d" " -f1)}${NC} → тег (32 hex)."
 	echo
 	local cur="${ADTAG:-}"; [[ -n "$cur" ]] && msg "Текущий AD_TAG: $cur"
 
@@ -1650,7 +1951,7 @@ do_adtag(){
 		[[ "$new" =~ ^[0-9a-f]{32}$ ]] || { err "AD_TAG должен быть 32 hex (или 'off' для удаления)."; exit 1; }
 		localip="$(ip -4 route get 8.8.8.8 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}' || true)"
 		[[ -n "$pubip" && -n "$localip" && "$localip" != "$pubip" ]] && natinfo=" --nat-info ${localip}:${pubip}"
-		local -a secs; read -r -a secs <<< "$(secrets_of "${PROFILES:-https:$SECRET}")"
+		local -a secs; read -r -a secs <<< "$(secrets_list)"
 		write_mtproxy_config "$new" "$natinfo" "${secs[@]}"
 		if systemctl restart mtproxy.service 2>/dev/null; then
 			sed -i "s|^ADTAG=.*|ADTAG=\"$new\"|" "$INFO_FILE"
@@ -1661,9 +1962,9 @@ do_adtag(){
 			systemctl restart mtproxy.service || err "MTProxy не стартует — journalctl -u mtproxy"
 			sed -i 's|^ADTAG=.*|ADTAG=""|' "$INFO_FILE"; exit 1
 		fi
-		verify_mtproxy_secrets "${PROFILES:-https:$SECRET}"
+		verify_mtproxy_secrets "$(secrets_list)"
 	else
-		local -a secs; read -r -a secs <<< "$(secrets_of "${PROFILES:-https:$SECRET}")"
+		local -a secs; read -r -a secs <<< "$(secrets_list)"
 		write_mtproxy_config "" "" "${secs[@]}"
 		systemctl restart mtproxy.service
 		sed -i 's|^ADTAG=.*|ADTAG=""|' "$INFO_FILE"
@@ -1673,7 +1974,7 @@ do_adtag(){
 
 do_uninstall(){
 	need_root uninstall
-	echo -e "${YELLOW}${BOLD}Удаление Telegram WEB Proxy${NC}\n"
+	title "Удаление Telegram WEB Proxy"
 	if [[ -r "$INFO_FILE" ]]; then # shellcheck disable=SC1090
 		source "$INFO_FILE"
 		msg "Перед удалением — ваши данные (сохраните, если нужны):"
@@ -1691,17 +1992,17 @@ do_uninstall(){
 	msg "Останавливаю службы…"
 	systemctl disable --now caddy.service tproxy-server.service mtproxy.service \
 		refresh-mtproxy-config.timer refresh-mtproxy-config.service tproxy-firewall.service \
-		tgmon-counters.service tgwp-geo.service 2>/dev/null || true
+		tgmon-counters.service tgwp-backend.socket tgwp-backend.service 2>/dev/null || true
+	systemctl unmask mtproxy.service 2>/dev/null || true
 
 	msg "Удаляю firewall-таблицы…"
 	nft delete table inet tproxy_backend 2>/dev/null || true
 	nft delete table inet "$MON_TABLE" 2>/dev/null || true
-	nft delete table inet tgfilter 2>/dev/null || true
 
 	msg "Удаляю systemd-юниты…"
 	rm -f /etc/systemd/system/{tproxy-server,mtproxy,tproxy-firewall,refresh-mtproxy-config}.service
-	rm -f /etc/systemd/system/refresh-mtproxy-config.timer "$MON_UNIT" "$GEO_UNIT"
-	rm -rf /etc/systemd/system/mtproxy.service.d /etc/tgwp
+	rm -f /etc/systemd/system/refresh-mtproxy-config.timer "$MON_UNIT" "$BK_SOCKET" "$BK_SERVICE"
+	rm -rf /etc/systemd/system/mtproxy.service.d
 	rm -f /etc/caddy/Caddyfile.tproxy
 	rm -rf /opt/MTProxy.before-tproxy.*
 	rm -f /usr/local/bin/tproxy-server /usr/local/bin/tproxy-server.previous /usr/local/bin/tproxy-server.next
@@ -1710,6 +2011,7 @@ do_uninstall(){
 
 	# Caddy: restore the OLDEST pre-tproxy backup (the user's true original)
 	local cbak sbak
+	if [[ "${ROLE:-single}" == backend ]]; then cbak="skip"; else
 	cbak="$(ls -1 /etc/caddy/Caddyfile.before-tproxy.* 2>/dev/null | sort | head -1 || true)"
 	sbak="$(ls -1 /etc/systemd/system/caddy.service.before-tproxy.* 2>/dev/null | sort | head -1 || true)"
 	if [[ -n "$cbak" ]]; then
@@ -1724,6 +2026,7 @@ do_uninstall(){
 		systemctl disable --now caddy.service 2>/dev/null || true
 		rm -f /etc/systemd/system/caddy.service /etc/systemd/system/caddy.service.before-tproxy.*
 		rm -rf /etc/systemd/system/caddy.service.d /etc/caddy /usr/local/bin/caddy
+	fi
 	fi
 	systemctl daemon-reload 2>/dev/null || true
 
@@ -1742,21 +2045,28 @@ do_uninstall(){
 }
 
 show_help(){
-	echo -e "${BLUE}${BOLD}tgwebproxy $TGWP_VERSION — управление Telegram WEB Proxy${NC}\n"
-	echo "Без аргументов — интерактивное меню с живой панелью. Команды (нужен sudo):"
-	echo -e "  ${GREEN}status [--full]${NC}— панель состояния (--full: все метрики relay и таблица vnstat)"
-	echo -e "  ${GREEN}watch${NC}          — живая панель (обновление каждые 2 с, q — выход)"
-	echo -e "  ${GREEN}link${NC}           — показать ссылки подключения"
-	echo -e "  ${GREEN}mode [режим]${NC}   — сменить тип подключения (carrier mode)"
-	echo -e "  ${GREEN}geo [ip|cc|off]${NC}— ограничить SSH по IP/стране (80/443 не трогает)"
-	echo -e "  ${GREEN}logs${NC}           — журналы relay/MTProxy/Caddy (follow)"
-	echo -e "  ${GREEN}restart${NC}        — перезапустить службы"
-	echo -e "  ${GREEN}update${NC}         — обновить relay из репозитория (с откатом)"
-	echo -e "  ${GREEN}adtag [32hex|off]${NC} — включить/сменить/убрать AD_TAG (@MTProxybot)"
-	echo -e "  ${GREEN}uninstall${NC}      — полностью удалить (--purge — с сайтом и сертификатами)"
-	echo -e "  ${GREEN}version${NC}        — версия утилиты и проверка обновлений"
-	echo -e "  ${GREEN}self-update${NC}    — обновить утилиту из опубликованного скрипта (--force — переустановить)"
-	echo -e "  ${GREEN}help${NC}           — эта справка"
+	title "tgwebproxy $TGWP_VERSION — управление Telegram WEB Proxy"
+	echo "  Без аргументов открывается меню с живой панелью. Команды (нужен sudo):"
+	echo
+	echo -e "  ${BOLD}Подключение${NC}"
+	echo -e "    ${GREEN}link${NC}                 ссылки подключения"
+	echo -e "    ${GREEN}mode [режим]${NC}         тип подключения: https | https-lanes | websocket | websocket-lanes | all"
+	echo -e "    ${GREEN}adtag [32hex|off]${NC}    спонсорский канал @MTProxybot (на backend-хосте в split-режиме)"
+	echo -e "  ${BOLD}Split-режим${NC} (relay и MTProxy на разных хостах)"
+	echo -e "    ${GREEN}backend [show|set <ip[:port]>|local]${NC}  куда relay отправляет трафик"
+	echo -e "    ${GREEN}secrets [set '<s1 s2>']${NC}   backend: секреты, те же что на front"
+	echo -e "    ${GREEN}allow [<ip/cidr,...>]${NC}     backend: кому открыт порт MTProxy"
+	echo -e "  ${BOLD}Обслуживание${NC}"
+	echo -e "    ${GREEN}status [--full]${NC}      панель состояния (--full: все метрики relay и таблица vnstat)"
+	echo -e "    ${GREEN}watch${NC}                живая панель (q — выход)"
+	echo -e "    ${GREEN}logs${NC}                 журналы relay, MTProxy и Caddy (follow)"
+	echo -e "    ${GREEN}restart${NC}              перезапуск служб"
+	echo -e "    ${GREEN}update${NC}               обновить relay из репозитория апстрима (с откатом)"
+	echo -e "  ${BOLD}Утилита${NC}"
+	echo -e "    ${GREEN}version${NC}              версия и проверка обновлений"
+	echo -e "    ${GREEN}self-update [--force]${NC} обновить утилиту из опубликованного скрипта"
+	echo -e "    ${GREEN}uninstall [--purge]${NC}  удалить (--purge: вместе с сайтом, сертификатами и пользователями)"
+	echo
 }
 
 case "${1:-}" in
@@ -1766,11 +2076,13 @@ case "${1:-}" in
 	watch)      do_watch ;;
 	link|links) show_link ;;
 	mode)       shift || true; do_mode "$@" ;;
-	geo)        shift || true; do_geo "$@" ;;
 	logs)       do_logs ;;
 	restart)    do_restart ;;
 	update)     do_update ;;
 	adtag|tag)  shift || true; do_adtag "$@" ;;
+	backend)    shift || true; do_backend "$@" ;;
+	secrets)    shift || true; do_secrets "$@" ;;
+	allow)      shift || true; do_allow "$@" ;;
 	uninstall)  shift || true; do_uninstall "${1:-}" ;;
 	version|-v|--version) show_version ;;
 	self-update|selfupdate) shift || true; do_self_update "${1:-}" ;;
@@ -1789,7 +2101,7 @@ main() {
 	local cmd="${1:-install}"
 	case "$cmd" in
 		install|"") do_install ;;
-		menu|status|watch|link|links|mode|geo|logs|restart|update|adtag|tag|uninstall|self-update|selfupdate)
+		menu|status|watch|link|links|mode|logs|restart|update|adtag|tag|backend|secrets|allow|uninstall|self-update|selfupdate)
 			if [[ -x "$MGMT" ]]; then exec "$MGMT" "$@"
 			else die "WEB-прокси ещё не установлен. Сначала запустите установку без аргументов."; fi ;;
 		version|-v|--version)
@@ -1804,15 +2116,17 @@ main() {
 		help|-h|--help)
 			echo -e "${BLUE}${BOLD}Telegram WEB Proxy v$TGWP_VERSION — установщик${NC}\n"
 			echo "Использование:"
-			echo -e "  ${GREEN}bash <(wget -qO- https://dignezzz.github.io/server/tg-webproxy.sh)${NC}            — установка"
-			echo -e "  ${GREEN}bash <(wget -qO- https://dignezzz.github.io/server/tg-webproxy.sh) uninstall${NC}  — удаление"
+			echo -e "  ${GREEN}bash <(wget -qO- ${SCRIPT_URLS[0]})${NC}            — установка"
+			echo -e "  ${GREEN}bash <(wget -qO- ${SCRIPT_URLS[0]}) uninstall${NC}  — удаление"
+			echo -e "  Документация: ${GREEN}https://github.com/DigneZzZ/tg-webproxy${NC}"
 			echo
 			echo -e "После установки — команда ${GREEN}tgwebproxy${NC}:"
-			echo -e "  status | watch | link | mode | geo | logs | restart | update | adtag | version | self-update | uninstall | help"
+			echo -e "  status | watch | link | mode | logs | restart | update | adtag | version | self-update | uninstall | help"
 			echo
 			echo "Env для non-interactive установки:"
 			echo "  TGWP_HOSTNAME TGWP_EMAIL TGWP_SECRET TGWP_MODE TGWP_ADTAG"
-			echo "  TGWP_WORKERS TGWP_MAXCONN TGWP_SITE_DIR TGWP_REF TGWP_YES=1" ;;
+			echo "  TGWP_WORKERS TGWP_MAXCONN TGWP_SITE_DIR TGWP_REF TGWP_YES=1"
+			echo "  Split: TGWP_ROLE=front TGWP_BACKEND=ip:port  |  TGWP_ROLE=backend TGWP_SECRETS='s1 s2' TGWP_ALLOW_FROM=cidr,..." ;;
 		*) die "Неизвестная команда '$cmd'. Справка: аргумент help" ;;
 	esac
 }
