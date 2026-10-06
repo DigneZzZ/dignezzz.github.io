@@ -41,7 +41,7 @@
 set -euo pipefail
 umask 077
 
-TGWP_VERSION="1.4.0"   # bump on every change: `tgwebproxy version` / self-update compare it
+TGWP_VERSION="1.4.1"   # bump on every change: `tgwebproxy version` / self-update compare it
 # C.UTF-8 is built into glibc >= 2.35 (Ubuntu 22.04+/Debian 12+): keeps ${var:0:1}
 # and tr multibyte-safe even when the SSH client forwards an uninstalled locale.
 export LC_ALL=C.UTF-8
@@ -708,7 +708,7 @@ do_install() {
 		[[ -n "${TGWP_BASEPATH:-}" && "${TGWP_BASEPATH,,}" != "auto" ]] && exit 2
 		[[ -z "$HAS_TTY" ]] && die "Нет терминала — задайте корректный TGWP_BASEPATH."
 	done
-	ok "Путь: ${BASEPATH:+/$BASEPATH}${BASEPATH:-корень (/)}"
+	if [[ -n "$BASEPATH" ]]; then ok "Путь: /$BASEPATH"; else ok "Путь: корень (/)"; fi
 
 	# --- secret ---------------------------------------------------------
 	head2 "3) Секрет подключения"
