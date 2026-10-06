@@ -20,8 +20,15 @@
 # Non-interactive install (env overrides): TGWP_HOSTNAME, TGWP_EMAIL,
 #   TGWP_SECRET (32 hex or dd+32hex; empty = auto/keep), TGWP_ADTAG (32 hex),
 #   TGWP_MODE (https|https-lanes|websocket|websocket-lanes|all),
-#   TGWP_WORKERS, TGWP_MAXCONN, TGWP_SITE_DIR (own site), TGWP_REF (pin repo commit),
-#   TGWP_YES=1 (auto-confirm all prompts).
+#   TGWP_BASEPATH (slug | none | auto; auto = random slug on fresh installs,
+#     keep the current one on reinstalls — the carrier then lives under
+#     /<slug>/ off well-known root paths, like upstream since 2026-09-10),
+#   TGWP_SITE_DIR (own static site) or TGWP_SITE_UPSTREAM (http://127.0.0.1:port,
+#     the relay reverse-proxies your running app — upstream "mode B"),
+#   TGWP_PQ_TLS=1 keep post-quantum TLS curves (default: x25519 only, because
+#     Telegram Android up to 12.10.x fails against X25519MLKEM768,
+#     bugs.telegram.org/c/66121), TGWP_WORKERS, TGWP_MAXCONN,
+#   TGWP_REF (pin repo commit), TGWP_YES=1 (auto-confirm all prompts).
 # Split mode (relay and MTProxy on different hosts, joined by NetBird/WireGuard):
 #   TGWP_ROLE=front   + TGWP_BACKEND=<tunnel ip[:port]>            (Caddy + relay here)
 #   TGWP_ROLE=backend + TGWP_SECRETS="s1 s2" TGWP_ALLOW_FROM=<cidr,...>  (only MTProxy here)
@@ -34,7 +41,7 @@
 set -euo pipefail
 umask 077
 
-TGWP_VERSION="1.3.2"   # bump on every change: `tgwebproxy version` / self-update compare it
+TGWP_VERSION="1.4.0"   # bump on every change: `tgwebproxy version` / self-update compare it
 # C.UTF-8 is built into glibc >= 2.35 (Ubuntu 22.04+/Debian 12+): keeps ${var:0:1}
 # and tr multibyte-safe even when the SSH client forwards an uninstalled locale.
 export LC_ALL=C.UTF-8
@@ -116,6 +123,48 @@ confirm() { # confirm <prompt>  -> 0 if yes
 
 # ---------------------------------------------------------------- utilities
 gen_secret() { head -c16 /dev/urandom | od -An -tx1 | tr -d ' \n'; }  # 32 lowercase hex, no openssl
+
+# Random 16-char lowercase base32 slug (80 bits), exactly what upstream
+# install.sh generates for --base-path: one segment, valid first character,
+# no padding. base32 comes from coreutils, always present.
+gen_slug() { head -c10 /dev/urandom | base32 | tr 'A-Z' 'a-z' | tr -d '=\n'; }
+
+valid_slug() { # <slug|""> — upstream BASE_PATH.md §1 syntax
+	local p
+	[[ ${#1} -le 128 ]] || return 1
+	[[ -z "$1" ]] && return 0
+	[[ "$1" == */* || "$1" == "."* ]] || { [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]]; return $?; }
+	local -a segs
+	IFS='/' read -r -a segs <<< "$1"
+	for p in "${segs[@]}"; do [[ "$p" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]] || return 1; done
+}
+
+# base64url of 0x70 || raw secret bytes — the "marked" client-facing secret for
+# links under a base path (upstream README §6 / install.sh web_proxy_secret).
+# An old client decodes it, sees the 0x70 marker it can't handle, and reports
+# "unsupported proxy type, update" instead of silently connecting pathless.
+# hex may carry the dd transport prefix: 0x70 || DD || 16 bytes stays decodable.
+marked_secret() { # <hex32|dd+hex32>
+	{ printf '\x70'; printf "$(printf %s "$1" | sed 's/../\\x&/g')"; } \
+		| base64 | tr '+/' '-_' | tr -d '=\n'
+}
+
+read_base_path() { # current base_path from the relay config ("" = host root)
+	[[ -f /etc/tproxy-server/config.json ]] || return 0
+	sed -n 's/.*"base_path"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+		/etc/tproxy-server/config.json 2>/dev/null | head -n1
+}
+
+# client-facing "server" link parameter: hostname, %2F-encoded with the slug
+link_server() { # <hostname>
+	if [[ -n "${BASE_PATH:-}" ]]; then printf '%s%%2F%s' "$1" "$BASE_PATH"; else printf '%s' "$1"; fi
+}
+
+# client-facing secret for a LINK: marked only under a base path (root links
+# keep the plain hex so pre-base-path clients keep working)
+link_secret() { # <hex32|dd+hex32>
+	if [[ -n "${BASE_PATH:-}" ]]; then marked_secret "$1"; else printf '%s' "$1"; fi
+}
 
 detect_ip() {
 	local ip=""
@@ -504,12 +553,15 @@ repair_mtproxy_exec() { # fix the 0700 objs/ tree, restart MTProxy, wait for the
 	return 1
 }
 
-upstream_install() { # <host> <email> <workers> <maxconn> [--site-dir DIR]
+upstream_install() { # <host> <email> <workers> <maxconn> [extra flags...]
 	local h="$1" e="$2" w="$3" c="$4"; shift 4
 	export PATH="${STATE_DIR}/shim:${PATH}"     # runuser shim, see make_runuser_shim
 	cd "$REPO_DIR" && ./deploy/install.sh --hostname "$h" --email "$e" "$@" \
 		--mtproxy-workers "$w" --mtproxy-max-connections "$c"
 }
+
+# feature detection for TGWP_REF pins of pre-2026-09 upstream commits
+upstream_supports() { grep -q -- "$1" "$REPO_DIR/deploy/install.sh" 2>/dev/null; }
 
 report_install_failure() {
 	err "Официальный установщик завершился с ошибкой. Полный журнал: $LOG"
@@ -522,7 +574,7 @@ report_install_failure() {
 	elif grep -q 'curl: (22)' "$LOG" && ! grep -q 'go: downloading' "$LOG"; then
 		msg "Причина: не скачались proxy-secret / конфигурация DC с core.telegram.org (сеть сервера блокирует домен):"
 		grep 'curl: (22)' "$LOG" | tail -n 2 | sed 's/^/    /'
-		msg "Положите файлы в $TG_DIR (см. подсказку шага «Подготовка	) или задайте TGWP_TG_MIRROR, затем повторите."
+		msg "Положите файлы в $TG_DIR (см. подсказку шага «Подготовка») или задайте TGWP_TG_MIRROR, затем повторите."
 	elif grep -q 'did not become ready' "$LOG"; then
 		msg "Причина: relay не ответил на /readyz — не поднялся tproxy-server или MTProxy:"
 		journalctl -u tproxy-server -u mtproxy --no-pager -n 12 2>/dev/null | sed 's/^/    /' || true
@@ -627,6 +679,37 @@ do_install() {
 		[[ -z "$HAS_TTY" ]] && die "Нет терминала — задайте переменную TGWP_EMAIL."
 	done
 
+	# --- base path ------------------------------------------------------
+	# tproxy-server (2026-09-10): the carrier can live under /<slug>/ instead of
+	# the host root — scanners find only the website on well-known paths. The
+	# slug is vhost-level, one per relay; changing it re-issues every link.
+	head2 "2b) Скрытый путь (base path)"
+	msg "Транспорт будет доступен под /<путь>/ — на корне и типовых путях сканер видит только сайт."
+	msg "Ссылка принимает вид server=${GREEN}домен%2Fпуть${NC}, секрет в ссылке кодируется (0x70-маркер)."
+	msg "Нужен клиент с поддержкой путей: Telegram Desktop ≥ 7.2, Android beta; сменить путь = перевыпустить все ссылки."
+	local BASEPATH PREV_BP BP_DEFAULT
+	PREV_BP="$(read_base_path)"
+	[[ -z "$PREV_BP" && -f "$INFO_FILE" ]] && PREV_BP="$(prev_field BASE_PATH)"
+	if [[ -n "${TGWP_BASEPATH:-}" && "${TGWP_BASEPATH,,}" != "auto" ]]; then
+		BASEPATH="${TGWP_BASEPATH}"
+	elif [[ -f "$INFO_FILE" ]]; then
+		BASEPATH="$PREV_BP"                                    # reinstall keeps the current path
+	else
+		BASEPATH="$(gen_slug)"                                 # fresh install: off well-known roots
+	fi
+	BP_DEFAULT="${BASEPATH:+/$BASEPATH}"; BP_DEFAULT="${BP_DEFAULT:-корень (/)}"
+	msg "Случайный путь — сильнее маскировка; ${GREEN}none${NC} — корень домена (как раньше)."
+	while :; do
+		ask BASEPATH "Путь (Enter = $BP_DEFAULT): " "$BASEPATH" "" || true
+		BASEPATH="$(echo "$BASEPATH" | tr -d '[:space:]')"
+		[[ "$BASEPATH" == "none" || "$BASEPATH" == "/" || "$BASEPATH" == "root" ]] && BASEPATH=""
+		valid_slug "$BASEPATH" && break
+		err "Путь: сегменты [A-Za-z0-9_-] через /, до 128 символов; или none для корня."
+		[[ -n "${TGWP_BASEPATH:-}" && "${TGWP_BASEPATH,,}" != "auto" ]] && exit 2
+		[[ -z "$HAS_TTY" ]] && die "Нет терминала — задайте корректный TGWP_BASEPATH."
+	done
+	ok "Путь: ${BASEPATH:+/$BASEPATH}${BASEPATH:-корень (/)}"
+
 	# --- secret ---------------------------------------------------------
 	head2 "3) Секрет подключения"
 	local SECRET="${TGWP_SECRET:-}"
@@ -689,7 +772,14 @@ do_install() {
 	# --- cover website --------------------------------------------------
 	head2 "6) Сайт-прикрытие"
 	local SITE_ARG=()
-	if [[ -n "${TGWP_SITE_DIR:-}" ]]; then
+	if [[ -n "${TGWP_SITE_UPSTREAM:-}" ]]; then
+		# upstream "mode B": the relay reverse-proxies a real app on loopback
+		[[ "$TGWP_SITE_UPSTREAM" =~ ^http://(127\.[0-9]+\.[0-9]+\.[0-9]+|\[::1\]):[1-9][0-9]{0,4}$ ]] \
+			|| die "TGWP_SITE_UPSTREAM должен быть вида http://127.0.0.1:3000 (loopback + порт)."
+		upstream_supports 'site-upstream' || die "Закреплённый tproxy-server не поддерживает --site-upstream (появился 2026-09)."
+		SITE_ARG=(--site-upstream "$TGWP_SITE_UPSTREAM")
+		ok "Сайт: reverse-proxy на $TGWP_SITE_UPSTREAM (режим B, совместное проживание)."
+	elif [[ -n "${TGWP_SITE_DIR:-}" ]]; then
 		local sd; sd="$(cd "${TGWP_SITE_DIR}" 2>/dev/null && pwd -P)" || die "TGWP_SITE_DIR не существует: ${TGWP_SITE_DIR}"
 		[[ -f "${sd}/index.html" ]] || die "В TGWP_SITE_DIR нет index.html."
 		if find "$sd" -type f ! -perm -o+r -print -quit 2>/dev/null | grep -q .; then
@@ -743,16 +833,27 @@ do_install() {
 	fi
 	msg "Коммит tproxy-server: ${GREEN}$REPO_REF${NC}. Сборка Go и MTProxy занимает несколько минут; полный вывод: $LOG"
 	# GOFLAGS: upstream install.sh runs `go test ./...` under its own umask 077,
-	# which turns the 0444 fixture of TestLoadAcceptsSystemdCredentialReadPermissions
-	# into 0400, so that single test fails on EVERY fresh install (tproxy-server
-	# 52a5feb, 2026-08-24). Skip exactly that test; go build ignores unknown flags.
+	# which turned the 0444 fixture of TestLoadAcceptsSystemdCredentialReadPermissions
+	# into 0400, so that single test failed on EVERY fresh install (fixed upstream
+	# 2026-09-29, commit 51215a2). The flag is a no-op on fixed sources and still
+	# lets TGWP_REF pin older commits; go build ignores unknown flags.
 	export GOFLAGS='-skip=TestLoadAcceptsSystemdCredentialReadPermissions'
 	# Re-install: a binary built by an earlier run may still be 0700 root (see make_runuser_shim)
 	[[ -d /opt/MTProxy/objs ]] && { chmod -R a+rX /opt/MTProxy 2>/dev/null || true; }
 	make_runuser_shim; make_curl_shim
+	# base path is passed explicitly: "" means "none" (root). Old pinned commits
+	# without the flag install at the root too, so links stay valid either way.
+	local BP_ARGS=()
+	if upstream_supports 'base-path'; then
+		BP_ARGS=(--base-path "${BASEPATH:-none}")
+	else
+		warn "Закреплённый tproxy-server ($REPO_REF) без base path — установка в корень домена."
+		BASEPATH=""; BASE_PATH=""
+	fi
 	RUN_STDIN="$SECRET"     # the secret goes in via stdin: never in argv / ps
 	if ! run_logged "Сборка и установка" install_phase \
-			upstream_install "$HOSTNAME" "$EMAIL" "$WORKERS" "$MAXCONN" "${SITE_ARG[@]}"; then
+			upstream_install "$HOSTNAME" "$EMAIL" "$WORKERS" "$MAXCONN" \
+			"${SITE_ARG[@]}" "${BP_ARGS[@]}"; then
 		RUN_STDIN=""; unset GOFLAGS
 		if mtproxy_exec_failed && repair_mtproxy_exec; then
 			warn "MTProxy был собран без прав на исполнение для пользователя mtproxy (203/EXEC, баг апстрима) —"
@@ -764,8 +865,16 @@ do_install() {
 	fi
 	RUN_STDIN=""; unset GOFLAGS
 
+	# --- base path: read back what the relay actually serves ------------
+	BASE_PATH="$(read_base_path)"
+	set_info BASE_PATH "$BASE_PATH"
+	[[ -n "$BASE_PATH" ]] && ok "Транспорт живёт под ${GREEN}/$BASE_PATH/${NC}" \
+		|| ok "Транспорт в корне домена."
+
 	# --- harden Caddy's always-on error logger (capability leak) --------
 	harden_caddy_log "$HOSTNAME" "$EMAIL" || true
+	# --- TLS compat: no post-quantum curves, no Via header --------------
+	patch_caddy_compat || true
 
 	# --- carrier mode / profiles ----------------------------------------
 	PROFILE_LIST="https:$SECRET"
@@ -956,12 +1065,14 @@ configure_modes() {  # <secret> <mode>
 # systemd does NOT word-split "${VAR}", so several secrets need several env
 # variables. Everything lives in ONE drop-in: two drop-ins each doing an
 # "ExecStart=" reset would clobber each other in alphabetical order.
-compute_natinfo() { # <pubip> -> " --nat-info priv:pub" or empty
+# NAT: since tproxy-server 2026-09 the env carries MTPROXY_NAT_ARGS and the
+# upstream unit passes it as unquoted $MTPROXY_NAT_ARGS (empty -> no argument);
+# our drop-in mirrors that, so --nat-info survives every secret/tag rewrite.
+compute_natinfo() { # <pubip> -> "local:pub" or empty (pair for MTPROXY_NAT_ARGS)
 	local pubip="$1" localip
 	localip="$(ip -4 route get 8.8.8.8 2>/dev/null \
 		| awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}' || true)"
-	[[ -n "$pubip" && -n "$localip" && "$localip" != "$pubip" ]] \
-		&& printf ' --nat-info %s:%s' "$localip" "$pubip"
+	[[ -n "$pubip" && -n "$localip" && "$localip" != "$pubip" ]] && printf '%s:%s' "$localip" "$pubip"
 	return 0
 }
 
@@ -988,11 +1099,11 @@ secrets_of() { # <profile_list "mode:secret ...">  -> "secret secret ..."
 	printf '%s' "$out"
 }
 
-write_mtproxy_config() { # <adtag|""> <natinfo|""> <secret...>
-	local tag="$1" natinfo="$2"; shift 2
+write_mtproxy_config() { # <adtag|""> <natpair|""> <secret...>
+	local tag="$1" natpair="$2"; shift 2
 	local i=0 s bs sflags="" tagflag=""
 
-	sed -i '/^MTPROXY_SECRET[0-9]*=/d; /^MTPROXY_TAG=/d' "$MTENV" 2>/dev/null || true
+	sed -i '/^MTPROXY_SECRET[0-9]*=/d; /^MTPROXY_TAG=/d; /^MTPROXY_NAT_ARGS=/d' "$MTENV" 2>/dev/null || true
 	for s in "$@"; do
 		i=$((i + 1)); bs="$s"
 		# mirror install.sh: the dd transport marker is client-side only
@@ -1009,15 +1120,22 @@ write_mtproxy_config() { # <adtag|""> <natinfo|""> <secret...>
 		printf 'MTPROXY_TAG=%s\n' "$tag" >> "$MTENV"
 		tagflag=' -P ${MTPROXY_TAG}'
 	fi
+	if [[ -n "$natpair" ]]; then
+		printf 'MTPROXY_NAT_ARGS="--nat-info %s"\n' "$natpair" >> "$MTENV"
+	else
+		printf 'MTPROXY_NAT_ARGS=\n' >> "$MTENV"
+	fi
 	chown root:mtproxy "$MTENV" 2>/dev/null || true
 	chmod 0640 "$MTENV"
 
 	mkdir -p /etc/systemd/system/mtproxy.service.d
 	rm -f "$ADTAG_DROPIN"          # retire the old single-purpose drop-in
+	# $MTPROXY_NAT_ARGS is deliberately UNBRACED: systemd word-splits unquoted
+	# $VAR and expands an empty one to zero arguments (same as upstream unit).
 	cat > "$MT_DROPIN" <<EOF
 [Service]
 ExecStart=
-ExecStart=/opt/MTProxy/objs/bin/mtproto-proxy -u mtproxy -p 8888 -H 2398${sflags}${tagflag}${natinfo} --aes-pwd /etc/mtproxy/proxy-secret /etc/mtproxy/proxy-multi.conf -M \${MTPROXY_WORKERS} -C \${MTPROXY_MAX_CONNECTIONS}
+ExecStart=/opt/MTProxy/objs/bin/mtproto-proxy -u mtproxy -p 8888 -H 2398${sflags}${tagflag} \$MTPROXY_NAT_ARGS --aes-pwd /etc/mtproxy/proxy-secret /etc/mtproxy/proxy-multi.conf -M \${MTPROXY_WORKERS} -C \${MTPROXY_MAX_CONNECTIONS}
 EOF
 	systemctl daemon-reload
 }
@@ -1025,12 +1143,12 @@ EOF
 # Apply secrets (+ optional ad tag) to MTProxy and restart it.
 # Falls back to secrets-only if MTProxy refuses to start with the tag.
 sync_mtproxy() { # <adtag|""> <pubip> <profile_list>
-	local tag="$1" pubip="$2" plist="$3" natinfo=""
+	local tag="$1" pubip="$2" plist="$3" natpair=""
 	local -a secrets; read -r -a secrets <<< "$(secrets_of "$plist")"
-	[[ -n "$tag" ]] && natinfo="$(compute_natinfo "$pubip")"
-	[[ -n "$natinfo" ]] && msg "Обнаружен NAT → добавляю${natinfo}."
+	natpair="$(compute_natinfo "$pubip")"
+	[[ -n "$natpair" ]] && msg "Обнаружен NAT → MTPROXY_NAT_ARGS=--nat-info $natpair."
 
-	write_mtproxy_config "$tag" "$natinfo" "${secrets[@]}"
+	write_mtproxy_config "$tag" "$natpair" "${secrets[@]}"
 	if systemctl restart mtproxy.service 2>/dev/null; then
 		[[ -n "$tag" ]] && ok "AD_TAG применён (middle-proxy mode)."
 		return 0
@@ -1038,7 +1156,7 @@ sync_mtproxy() { # <adtag|""> <pubip> <profile_list>
 	if [[ -n "$tag" ]]; then
 		warn "MTProxy не запустился с AD_TAG — откатываю тег (прокси продолжит работать без него)."
 		msg  "Диагностика: journalctl -u mtproxy --no-pager -n 50"
-		write_mtproxy_config "" "" "${secrets[@]}"
+		write_mtproxy_config "" "$natpair" "${secrets[@]}"
 		systemctl restart mtproxy.service || warn "MTProxy всё ещё не стартует — проверьте журнал."
 		sed -i 's|^ADTAG=.*|ADTAG=""|' "$INFO_FILE" 2>/dev/null || true
 		return 1
@@ -1090,6 +1208,62 @@ CADDYLOG
 	fi
 	rm -f "$tmp"
 	warn "Не удалось применить фильтр логов Caddy — проверьте /etc/caddy/Caddyfile вручную."
+	return 1
+}
+
+# ---------------------------------------------------------------- TLS / fingerprint compat
+# Two upstream-aligned tweaks applied to the installed Caddyfile:
+#   1. `tls { curves x25519 secp256r1 }` — Telegram Android (включая Google
+#      Play builds 12.10.x) не подключается, когда сервер выбирает
+#      post-quantum X25519MLKEM768 (bugs.telegram.org/c/66121, открыт;
+#      Caddy ≥ 2.10 на Go ≥ 1.24 предлагает его по умолчанию всем клиентам,
+#      поддерживающим PQ). Пока баг не исправлен, ограничиваем группы.
+#      Вернуть PQ: TGWP_PQ_TLS=1 при установке или убрать блок tls вручную.
+#   2. `header -Via` — как в апстримном deploy/Caddyfile (issue #13): Caddy
+#      иначе подписывает Via: 1.1 caddy и даёт активному пробнику лишний
+#      отпечаток «здесь обратный прокси».
+patch_caddy_compat() {
+	local cf=/etc/caddy/Caddyfile tmp host_line
+	[[ -f "$cf" ]] || return 1
+	command -v /usr/local/bin/caddy >/dev/null 2>&1 || return 1
+
+	local want_curves=1
+	[[ "${TGWP_PQ_TLS:-}" == "1" ]] && want_curves=0
+	if grep -q 'curves x25519' "$cf" && grep -q -- '-Via' "$cf"; then return 0; fi
+	if (( ! want_curves )) && grep -q -- '-Via' "$cf"; then return 0; fi
+
+	host_line="$(grep -n -m1 -E '^(\{\$TPROXY_HOSTNAME\}|[a-z0-9][a-z0-9.-]*[a-z0-9]) \{' "$cf" 2>/dev/null | head -1 | cut -d: -f1)"
+	[[ -n "$host_line" ]] || { warn "Не нашёл блок сайта в Caddyfile — пропускаю TLS-патч."; return 1; }
+
+	tmp="$(mktemp)"
+	{
+		head -n "$host_line" "$cf"
+		if (( want_curves )) && ! grep -q 'curves x25519' "$cf"; then
+			echo '	# tg-webproxy.sh: post-quantum groups off — Telegram Android 12.10.x'
+			echo '	# fails against X25519MLKEM768 (bugs.telegram.org/c/66121). Do not remove'
+			echo '	# until that bug is fixed; see also TGWP_PQ_TLS=1.'
+			echo '	tls {'
+			echo '		curves x25519 secp256r1'
+			echo '	}'
+		fi
+		if ! grep -q -- '-Via' "$cf"; then
+			echo '	# tg-webproxy.sh: no Via fingerprint (same as upstream Caddyfile).'
+			echo '	header -Via'
+		fi
+		tail -n +$((host_line + 1)) "$cf"
+	} > "$tmp"
+
+	if TPROXY_HOSTNAME="$HOSTNAME" TPROXY_SITE_ROOT=/srv/tproxy-site ACME_EMAIL="${EMAIL:-webmaster@${HOSTNAME}}" \
+			/usr/local/bin/caddy validate --config "$tmp" --adapter caddyfile >/dev/null 2>&1; then
+		install -m 0644 "$tmp" "$cf"; rm -f "$tmp"
+		systemctl reload caddy.service 2>/dev/null || systemctl restart caddy.service 2>/dev/null || true
+		(( want_curves )) \
+			&& ok "TLS: post-quantum curves отключены (совместимость с Android), Via скрыт." \
+			|| ok "TLS: Via скрыт (post-quantum оставлен по TGWP_PQ_TLS=1)."
+		return 0
+	fi
+	rm -f "$tmp"
+	warn "TLS-патч Caddy не прошёл валидацию — оставляю Caddyfile как есть."
 	return 1
 }
 
@@ -1437,18 +1611,29 @@ print_result() { # <hostname> <secret> <adtag> <profile_list> [role] [backend] [
 	for p in ${profiles:-https:$secret}; do
 		m="${p%%:*}"; s="${p#*:}"
 		echo -e "  ${BOLD}[$m]${NC}"
-		echo -e "    ${GREEN}https://t.me/webproxy?server=$host&secret=$s${NC}"
-		echo -e "    ${GREEN}tg://webproxy?server=$host&secret=$s${NC}"
+		echo -e "    ${GREEN}https://t.me/webproxy?server=$(link_server "$host")&secret=$(link_secret "$s")${NC}"
+		echo -e "    ${GREEN}tg://webproxy?server=$(link_server "$host")&secret=$(link_secret "$s")${NC}"
 	done
 	echo
 	echo -e "${YELLOW}Как добавить вручную (самый надёжный способ):${NC}"
 	echo -e "  Telegram → Настройки → Продвинутые → Тип соединения →"
-	echo -e "  Добавить прокси → ${BOLD}WEB${NC} → Hostname: ${GREEN}$host${NC}, Secret: ${GREEN}$secret${NC}"
+	echo -e "  Добавить прокси → ${BOLD}WEB${NC} → Сервер: ${GREEN}$host${BASE_PATH:+/$BASE_PATH}${NC}, Secret: ${GREEN}$secret${NC}"
+	if [[ -n "$BASE_PATH" ]]; then
+		msg "  (в ссылке секрет закодирован 0x70-маркером — копируйте ссылку целиком;"
+		msg "   при ручном вводе — обычный hex, а путь дописывается к домену через «/»)"
+	fi
 	echo
-	warn "Клиент должен поддерживать WEB-прокси: Telegram Desktop ≥ 7.1.1 (авг 2026)"
-	warn "или Android beta 12.10.2+. На iOS/macOS-native пока нет."
+	warn "Клиент должен поддерживать WEB-прокси: Telegram Desktop ≥ 7.1.1 (авг 2026),"
+	warn "пути — Desktop ≥ 7.2; Android — beta-сборки 12.10.2+ (Google Play: см. ниже)."
+	warn "На iOS и macOS-native пока нет."
+	[[ -n "$BASE_PATH" ]] && warn "Скрытый путь поддерживают не все клиенты: старые версии Telegram скажут"
+	[[ -n "$BASE_PATH" ]] && warn "«неподдерживаемый тип прокси» — обновите клиент (это задумано)."
 	warn "Публичный t.me пока НЕ регистрирует маршрут /webproxy — для теста"
 	warn "используйте ссылку tg:// или ручной ввод."
+	if [[ "${TGWP_PQ_TLS:-}" != "1" ]]; then
+		warn "Post-quantum TLS отключён в Caddy: Google Play-сборки Android 12.10.x падают"
+		warn "на X25519MLKEM768 (bugs.telegram.org/c/66121). Вернуть: TGWP_PQ_TLS=1."
+	fi
 	if [[ -n "$adtag" ]]; then
 		echo; warn "AD_TAG включён, но для WEB-прокси показ спонсорского канала НЕ гарантирован."
 		msg  "Подробности и ограничения: tgwebproxy adtag"
@@ -1456,7 +1641,8 @@ print_result() { # <hostname> <secret> <adtag> <profile_list> [role] [backend] [
 	echo
 	echo -e "${YELLOW}${BOLD}Не трогайте на этом домене${NC} (иначе маскировка ломается): Caddyfile без file_server/root/redir/respond,"
 	echo -e "  без path-scoped правил, request_body max_size и h3, таймауты не снижать; никакого CDN перед доменом;"
-	echo -e "  не объединяйте несколько таких доменов в один сертификат (CT свяжет их публично)."
+	echo -e "  блок tls { curves … } не расширять (Android), не объединяйте несколько таких доменов"
+	echo -e "  в один сертификат (CT свяжет их публично)."
 	echo
 	if [[ "$role" == front ]]; then
 		echo -e "${YELLOW}${BOLD}Backend:${NC} relay ходит в ${GREEN}$backend${NC} через туннель. На backend-хосте выполните:"
@@ -1533,15 +1719,17 @@ conns(){ ss -Htn state established "( $1 = :$2 )" 2>/dev/null | wc -l | tr -d ' 
 # The client secret IS the MTProxy secret, so MTProxy must be started with
 # every secret the relay serves. One drop-in only — two ExecStart resets would
 # clobber each other. systemd does not word-split ${VAR}: one var per secret.
+# NAT: MTPROXY_NAT_ARGS in the env + unbraced $MTPROXY_NAT_ARGS in ExecStart
+# (empty -> no argument), mirroring the 2026-09 upstream unit.
 compute_natinfo(){ local pubip="$1" localip
 	localip="$(ip -4 route get 8.8.8.8 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}')"
-	[[ -n "$pubip" && -n "$localip" && "$localip" != "$pubip" ]] && printf ' --nat-info %s:%s' "$localip" "$pubip"
+	[[ -n "$pubip" && -n "$localip" && "$localip" != "$pubip" ]] && printf '%s:%s' "$localip" "$pubip"
 	return 0; }
 secrets_of(){ local p out=""; for p in $1; do out+="${out:+ }${p#*:}"; done; printf '%s' "$out"; }
-write_mtproxy_config(){ # <tag|""> <natinfo|""> <secret...>
-	local tag="$1" natinfo="$2"; shift 2
+write_mtproxy_config(){ # <tag|""> <natpair|""> <secret...>
+	local tag="$1" natpair="$2"; shift 2
 	local i=0 s bs sflags="" tagflag=""
-	sed -i '/^MTPROXY_SECRET[0-9]*=/d; /^MTPROXY_TAG=/d' "$MTENV" 2>/dev/null || true
+	sed -i '/^MTPROXY_SECRET[0-9]*=/d; /^MTPROXY_TAG=/d; /^MTPROXY_NAT_ARGS=/d' "$MTENV" 2>/dev/null || true
 	for s in "$@"; do
 		i=$((i+1)); bs="$s"
 		[[ "$bs" == dd* && ${#bs} -eq 34 ]] && bs="${bs:2}"
@@ -1549,12 +1737,14 @@ write_mtproxy_config(){ # <tag|""> <natinfo|""> <secret...>
 		else printf 'MTPROXY_SECRET%d=%s\n' "$i" "$bs" >> "$MTENV"; sflags+=" -S \${MTPROXY_SECRET${i}}"; fi
 	done
 	if [[ -n "$tag" ]]; then printf 'MTPROXY_TAG=%s\n' "$tag" >> "$MTENV"; tagflag=' -P ${MTPROXY_TAG}'; fi
+	if [[ -n "$natpair" ]]; then printf 'MTPROXY_NAT_ARGS="--nat-info %s"\n' "$natpair" >> "$MTENV"
+	else printf 'MTPROXY_NAT_ARGS=\n' >> "$MTENV"; fi
 	chown root:mtproxy "$MTENV" 2>/dev/null || true; chmod 0640 "$MTENV"
 	mkdir -p /etc/systemd/system/mtproxy.service.d; rm -f "$ADTAG_DROPIN"
 	cat > "$MT_DROPIN" <<EOF
 [Service]
 ExecStart=
-ExecStart=/opt/MTProxy/objs/bin/mtproto-proxy -u mtproxy -p 8888 -H 2398${sflags}${tagflag}${natinfo} --aes-pwd /etc/mtproxy/proxy-secret /etc/mtproxy/proxy-multi.conf -M \${MTPROXY_WORKERS} -C \${MTPROXY_MAX_CONNECTIONS}
+ExecStart=/opt/MTProxy/objs/bin/mtproto-proxy -u mtproxy -p 8888 -H 2398${sflags}${tagflag} \$MTPROXY_NAT_ARGS --aes-pwd /etc/mtproxy/proxy-secret /etc/mtproxy/proxy-multi.conf -M \${MTPROXY_WORKERS} -C \${MTPROXY_MAX_CONNECTIONS}
 EOF
 	systemctl daemon-reload; }
 verify_mtproxy_secrets(){ local want got
@@ -1642,9 +1832,9 @@ do_secrets(){ # backend: show | set "<s1 s2 ...>"
 	new="${new#set }"
 	new="$(echo "$new" | tr 'A-Z,' 'a-z ' | tr -s '[:space:]' ' ' | sed 's/^ //; s/ $//')"
 	valid_secret_list "$new" || { err "Каждый секрет — 32 hex (можно с префиксом dd)."; exit 1; }
-	local natinfo=""; [[ -n "${ADTAG:-}" ]] && natinfo="$(compute_natinfo "${PUBIP:-}")"
+	local natpair=""; natpair="$(compute_natinfo "${PUBIP:-}")"
 	local -a secs; read -r -a secs <<< "$new"
-	write_mtproxy_config "${ADTAG:-}" "$natinfo" "${secs[@]}"
+	write_mtproxy_config "${ADTAG:-}" "$natpair" "${secs[@]}"
 	systemctl restart mtproxy.service || warn "MTProxy не перезапустился — journalctl -u mtproxy"
 	set_info SECRETS "$new"; verify_mtproxy_secrets "$new"
 }
@@ -1714,23 +1904,36 @@ do_self_update(){ # re-generates this CLI from the newest published tg-webproxy.
 	rm -f "$tmp" "$VER_CACHE"
 	ok "tgwebproxy обновлён: $TGWP_VERSION → $rv (источник: $url)."; }
 
+# ---------------------------------------------------------------- links (client-facing)
+# base64url of 0x70 || secret bytes — the marked form for links under a base
+# path (upstream README §6); root links keep the plain hex for old clients.
+marked_secret(){ # <hex32|dd+hex32>
+	{ printf '\x70'; printf "$(printf %s "$1" | sed 's/../\\x&/g')"; } | base64 | tr '+/' '-_' | tr -d '=\n'; }
+link_server(){ # <hostname>
+	if [[ -n "${BASE_PATH:-}" ]]; then printf '%s%%2F%s' "$1" "$BASE_PATH"; else printf '%s' "$1"; fi; }
+link_secret(){ # <hex32|dd+hex32>
+	if [[ -n "${BASE_PATH:-}" ]]; then marked_secret "$1"; else printf '%s' "$1"; fi; }
+
 show_link(){
 	need_root link; load_info
 	[[ "$ROLE" == backend ]] && { err "Ссылки печатает front-хост (там домен и relay)."; exit 1; }
 	update_notice
-	title "Ссылки подключения"
+	title "Ссылки подключения${BASE_PATH:+  ·  путь /$BASE_PATH}"
 	local p m s
 	for p in ${PROFILES:-https:$SECRET}; do
 		m="${p%%:*}"; s="${p#*:}"
 		echo -e "  ${BOLD}[$m]${NC}"
-		echo -e "    ${GREEN}https://t.me/webproxy?server=$HOSTNAME&secret=$s${NC}"
-		echo -e "    ${GREEN}tg://webproxy?server=$HOSTNAME&secret=$s${NC}"
+		echo -e "    ${GREEN}https://t.me/webproxy?server=$(link_server "$HOSTNAME")&secret=$(link_secret "$s")${NC}"
+		echo -e "    ${GREEN}tg://webproxy?server=$(link_server "$HOSTNAME")&secret=$(link_secret "$s")${NC}"
 	done
 	echo
 	echo -e "  Ручной ввод: Telegram → Настройки → Продвинутые → Тип соединения →"
-	echo -e "  Добавить прокси → ${BOLD}WEB${NC} → Hostname: ${GREEN}$HOSTNAME${NC}, Secret: ${GREEN}$SECRET${NC}"
+	echo -e "  Добавить прокси → ${BOLD}WEB${NC} → Сервер: ${GREEN}$HOSTNAME${BASE_PATH:+/$BASE_PATH}${NC}, Secret: ${GREEN}$SECRET${NC}"
+	[[ -n "${BASE_PATH:-}" ]] && msg "  (в ссылке секрет закодирован 0x70-маркером; вручную вводится обычный hex)"
 	echo
-	warn "Нужен клиент с поддержкой WEB-прокси: Desktop ≥ 7.1.1 или Android beta 12.10.2+."
+	warn "Клиент: Desktop ≥ 7.1.1 (пути — ≥ 7.2), Android beta 12.10.2+; iOS/macOS-native — нет."
+	[[ -n "${BASE_PATH:-}" ]] && warn "Старые клиенты откажут «неподдерживаемый тип прокси» — обновите клиент (это задумано)."
+	warn "Google Play-сборки Android требуют отключённый post-quantum TLS (мы отключаем это в Caddy)."
 	if [[ "$ROLE" == front ]]; then
 		echo; echo -e "${YELLOW}${BOLD}Backend-хост${NC} (${BACKEND:-?}) — установка или обновление секретов там:"
 		echo -e "  ${GREEN}TGWP_ROLE=backend TGWP_SECRETS='$(secrets_list)' TGWP_ALLOW_FROM=${TUNNEL_IP:-<IP этого хоста в туннеле>} bash <(wget -qO- ${SCRIPT_URLS[0]})${NC}"
@@ -1785,9 +1988,9 @@ do_mode(){
 	fi
 	rm -f "$pf.bak"
 	# MTProxy must know every new secret, otherwise those links die silently
-	local natinfo=""; [[ -n "${ADTAG:-}" ]] && natinfo="$(compute_natinfo "${PUBIP:-}")"
+	local natpair=""; natpair="$(compute_natinfo "${PUBIP:-}")"
 	local -a secs; read -r -a secs <<< "$(secrets_of "$list")"
-	write_mtproxy_config "${ADTAG:-}" "$natinfo" "${secs[@]}"
+	write_mtproxy_config "${ADTAG:-}" "$natpair" "${secs[@]}"
 	systemctl restart mtproxy.service || warn "MTProxy не перезапустился — journalctl -u mtproxy"
 	systemctl restart tproxy-server.service
 	verify_mtproxy_secrets "$list"
@@ -1858,7 +2061,7 @@ dashboard(){ # one screen: header box with a verdict, then two-column sections
 	if [[ -n "${ADTAG:-}" ]]; then adt="$(short_tag "$ADTAG")"; else adt="${DIM}нет${NC}"; fi
 	echo
 	two "${BLUE}${BOLD}ТРАФИК${NC}"                                                         "${BLUE}${BOLD}НАСТРОЙКИ${NC}"
-	two "relay     ↑ $(h2h "$(metric_of tproxy_bytes_up_total)")   ↓ $(h2h "$(metric_of tproxy_bytes_down_total)")" "транспорт   ${MODE:-https}  ${DIM}($(nprof) проф.)${NC}"
+	two "relay     ↑ $(h2h "$(metric_of tproxy_bytes_up_total)")   ↓ $(h2h "$(metric_of tproxy_bytes_down_total)")" "транспорт   ${MODE:-https}${BASE_PATH:+ · /$BASE_PATH}  ${DIM}($(nprof) проф.)${NC}"
 	two ":443      вход $(h2h "${ti:-0}")   выход $(h2h "${to:-0}")"                 "AD_TAG      $adt"
 	two "$(printf '%-9s' "${IF:-net}") сегодня ${drx:-?} / ${dtx:-?}"               "relay       ${REPO_REF:-?}  ${DIM}от ${INSTALLED_AT%% *}${NC}"
 	two "          месяц   ${mrx:-?} / ${mtx:-?}"                                    "$bkrow"
@@ -1999,6 +2202,10 @@ do_update(){
 	[[ -x "${REPO_DIR:-/opt/tproxy-server-src}/deploy/update-relay.sh" ]] \
 		|| { err "Нет ${REPO_DIR}/deploy/update-relay.sh"; exit 1; }
 	msg "Обновляю репозиторий и relay (с авто-откатом при неудаче)…"
+	if [[ ! -e /etc/tproxy-server/token.key ]]; then
+		msg "Первое обновление на подписанные carrier-токены: будет создан /etc/tproxy-server/token.key"
+		msg "и временно включён дрейн легаси-токенов (клиенты переподключатся сами)."
+	fi
 	git -C "$REPO_DIR" pull --ff-only 2>/dev/null || warn "git pull не удался — собираю текущую версию."
 	if ( cd "$REPO_DIR" && ./deploy/update-relay.sh ); then
 		local ref; ref="$(git -C "$REPO_DIR" rev-parse --short HEAD 2>/dev/null || echo unknown)"
@@ -2028,13 +2235,12 @@ do_adtag(){
 
 	new="$(echo "$new" | tr 'A-Z' 'a-z' | tr -d '[:space:]')"
 	[[ "$new" == "off" || "$new" == "none" ]] && new=""
-	local pubip="${PUBIP:-}" localip natinfo=""
+	local pubip="${PUBIP:-}" natpair=""
 	if [[ -n "$new" ]]; then
 		[[ "$new" =~ ^[0-9a-f]{32}$ ]] || { err "AD_TAG должен быть 32 hex (или 'off' для удаления)."; exit 1; }
-		localip="$(ip -4 route get 8.8.8.8 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}' || true)"
-		[[ -n "$pubip" && -n "$localip" && "$localip" != "$pubip" ]] && natinfo=" --nat-info ${localip}:${pubip}"
+		natpair="$(compute_natinfo "$pubip")"
 		local -a secs; read -r -a secs <<< "$(secrets_list)"
-		write_mtproxy_config "$new" "$natinfo" "${secs[@]}"
+		write_mtproxy_config "$new" "$natpair" "${secs[@]}"
 		if systemctl restart mtproxy.service 2>/dev/null; then
 			sed -i "s|^ADTAG=.*|ADTAG=\"$new\"|" "$INFO_FILE"
 			ok "AD_TAG установлен: $new (middle-proxy mode)."
@@ -2083,6 +2289,7 @@ do_uninstall(){
 
 	msg "Удаляю systemd-юниты…"
 	rm -f /etc/systemd/system/{tproxy-server,mtproxy,tproxy-firewall,refresh-mtproxy-config}.service
+	rm -rf /etc/systemd/system/tproxy-server.service.d   # token-migration.conf etc.
 	rm -f /etc/systemd/system/refresh-mtproxy-config.timer "$MON_UNIT" "$BK_SOCKET" "$BK_SERVICE"
 	rm -rf /etc/systemd/system/mtproxy.service.d
 	rm -f /etc/caddy/Caddyfile.tproxy
@@ -2207,7 +2414,9 @@ main() {
 			echo
 			echo "Env для non-interactive установки:"
 			echo "  TGWP_HOSTNAME TGWP_EMAIL TGWP_SECRET TGWP_MODE TGWP_ADTAG"
-			echo "  TGWP_WORKERS TGWP_MAXCONN TGWP_SITE_DIR TGWP_REF TGWP_YES=1"
+			echo "  TGWP_BASEPATH=<slug|none|auto>  TGWP_PQ_TLS=1 (оставить post-quantum TLS)"
+			echo "  TGWP_SITE_DIR=<dir>  или  TGWP_SITE_UPSTREAM=http://127.0.0.1:<port>"
+			echo "  TGWP_WORKERS TGWP_MAXCONN TGWP_REF TGWP_YES=1"
 			echo "  Split: TGWP_ROLE=front TGWP_BACKEND=ip:port  |  TGWP_ROLE=backend TGWP_SECRETS='s1 s2' TGWP_ALLOW_FROM=cidr,..."
 			echo "  Блокировка core.telegram.org: файлы в /opt/tgwebproxy/tg/ или TGWP_TG_MIRROR=https://host/path"
 			echo "  TGWP_SKIP_REACH=1 — не проверять доступность Telegram (на свой риск)" ;;
