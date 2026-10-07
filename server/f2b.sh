@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Версия скрипта
-SCRIPT_VERSION="3.8.0"
+SCRIPT_VERSION="3.8.1"
 VERSION_CHECK_URL="https://raw.githubusercontent.com/DigneZzZ/dignezzz.github.io/main/server/f2b.sh"
 
 # Константы путей конфигурации
@@ -162,20 +162,7 @@ if [[ "$(basename "$0")" == "f2b" ]] && [[ $# -gt 0 ]]; then
       exit 0
       ;;
     check-ports)
-      CURRENT_SSH_PORT=$(grep -Po '(?<=^Port )\d+' /etc/ssh/sshd_config | head -n1)
-      CURRENT_SSH_PORT=${CURRENT_SSH_PORT:-22}
-      F2B_SSH_PORT=""
-      if [ -f "$JAIL_LOCAL" ]; then
-        F2B_SSH_PORT=$(grep -A 10 "\[sshd\]" "$JAIL_LOCAL" | grep "^port" | cut -d'=' -f2 | tr -d ' ')
-      fi
-      echo "Current SSH port: $CURRENT_SSH_PORT"
-      echo "Fail2ban SSH port: ${F2B_SSH_PORT:-"not configured"}"
-      if [ -n "$F2B_SSH_PORT" ] && [ "$CURRENT_SSH_PORT" != "$F2B_SSH_PORT" ]; then
-        echo "WARNING: Port mismatch detected!"
-      else
-        echo "SSH ports are consistent"
-      fi
-      exit 0
+      exec "$0" --check-ports
       ;;
     stats)
       echo "Fail2ban Statistics:"
@@ -867,9 +854,10 @@ function get_jail_logpath() {
       done
       ;;
     haproxy|haproxy-*)
-      # Используем реестр или стандартные пути
+      # Сначала точное имя jail (напр. haproxy-rejected), затем общий ключ haproxy
       local hap_reg
-      hap_reg=$(get_log_from_registry "haproxy")
+      hap_reg=$(get_log_from_registry "$jail")
+      [ -z "$hap_reg" ] && hap_reg=$(get_log_from_registry "haproxy")
       if [ -n "$hap_reg" ]; then
         echo "$hap_reg"
         return
@@ -900,9 +888,10 @@ function get_jail_logpath() {
 }
 
 function check_ssh_port_consistency_quiet() {
-  # Тихая проверка портов SSH для статистики
-  local current_ssh_port=$(grep -Po '(?<=^Port )\d+' /etc/ssh/sshd_config 2>/dev/null | head -n1)
-  current_ssh_port=${current_ssh_port:-22}
+  # Тихая проверка портов SSH для статистики (с учётом sshd_config.d)
+  local current_ssh_ports current_ssh_port
+  current_ssh_ports=$(get_ssh_ports)
+  current_ssh_port=${current_ssh_ports%%,*}
   
   local f2b_ssh_port=""
   if [ -f "$JAIL_LOCAL" ]; then
@@ -910,10 +899,23 @@ function check_ssh_port_consistency_quiet() {
     f2b_ssh_port=$(awk '/^\[sshd\]/,/^\[/{if(/^port[[:space:]]*=/){gsub(/.*=[[:space:]]*/,""); gsub(/[[:space:]]*$/,""); print; exit}}' "$JAIL_LOCAL" 2>/dev/null)
   fi
   
-  if [ -n "$f2b_ssh_port" ] && [ "$current_ssh_port" != "$f2b_ssh_port" ]; then
-    echo -e "  ${RED}${ICON_WARNING} Несоответствие SSH портов:${NC} SSH(${BOLD}$current_ssh_port${NC}) vs F2B(${BOLD}$f2b_ssh_port${NC})"
-  else
+  if [ -z "$f2b_ssh_port" ]; then
     echo -e "  ${GREEN}${ICON_CHECK} SSH порт:${NC} ${BOLD}$current_ssh_port${NC}"
+    return
+  fi
+  
+  # Все активные порты SSH должны быть покрыты в jail
+  local uncovered="" p
+  for p in ${current_ssh_ports//,/ }; do
+    if [[ ",${f2b_ssh_port// /}," != *",$p,"* ]]; then
+      uncovered="${uncovered}${uncovered:+, }$p"
+    fi
+  done
+  
+  if [ -n "$uncovered" ]; then
+    echo -e "  ${RED}${ICON_WARNING} Несоответствие SSH портов:${NC} SSH(${BOLD}$current_ssh_ports${NC}) vs F2B(${BOLD}$f2b_ssh_port${NC}) — не покрыт: ${BOLD}$uncovered${NC}"
+  else
+    echo -e "  ${GREEN}${ICON_CHECK} SSH порт:${NC} ${BOLD}$current_ssh_port${NC} ${GRAY}(F2B: $f2b_ssh_port)${NC}"
   fi
 }
 
@@ -1411,12 +1413,12 @@ EOF
   # Добавляем конфигурацию для конкретного сервиса
   case "$service" in
     "sshd")
-      local ssh_port
-      ssh_port=$(grep -Po '(?<=^Port )\d+' /etc/ssh/sshd_config | head -n1)
-      ssh_port=${ssh_port:-22}
+      # Порты из sshd_config + drop-in'ов sshd_config.d (все активные)
+      local ssh_ports
+      ssh_ports=$(get_ssh_ports)
       local ssh_log_path
       ssh_log_path=$(get_ssh_log_path)
-      add_jail_config "$service" "enabled = true" "port = $ssh_port" "filter = sshd" "logpath = $ssh_log_path" "maxretry = 3" "bantime = 600"
+      add_jail_config "$service" "enabled = true" "port = $ssh_ports" "filter = sshd" "logpath = $ssh_log_path" "maxretry = 3" "bantime = 600"
       ;;
     "nginx")
       # Автодетект пути к логам
@@ -2652,18 +2654,77 @@ function install_fail2ban() {
   fi
 }
 
+# ═══════════════════════════════════════════════════════════════════
+# ОПРЕДЕЛЕНИЕ ПОРТОВ SSH (с учётом drop-in конфигов sshd_config.d)
+# ═══════════════════════════════════════════════════════════════════
+
+# Определить порты SSH с учётом drop-in конфигов (/etc/ssh/sshd_config.d/*.conf).
+# ВАЖНО: sshd слушает на ВСЕХ активных портах — директива Port может повторяться
+# и в основном конфиге, и в Include-файлах (объединяются). Поэтому собираем
+# объединение портов из sshd_config и всех файлов из директив Include.
+# Возвращает: "5322" или "5322,22".
+# SSH_PORT_SOURCE — файлы-источники портов (для отображения).
+function get_ssh_ports() {
+  local main_cfg="/etc/ssh/sshd_config"
+  SSH_PORT_SOURCE=""
+  
+  if [ ! -f "$main_cfg" ]; then
+    echo "22"
+    return 0
+  fi
+  
+  local tmp_sources
+  tmp_sources=$(mktemp /tmp/f2b-sshports.XXXXXX)
+  
+  # Все файлы конфигурации sshd: основной + drop-in'ы из Include
+  local cfg_files=("$main_cfg")
+  local p f
+  while IFS= read -r p; do
+    # Относительные пути Include — относительно /etc/ssh
+    [[ "$p" != /* ]] && p="/etc/ssh/$p"
+    for f in $p; do
+      [ -f "$f" ] && cfg_files+=("$f")
+    done
+  done < <(grep -iE '^[[:space:]]*Include[[:space:]]' "$main_cfg" 2>/dev/null | awk '{for(i=2;i<=NF;i++) print $i}')
+  
+  for f in "${cfg_files[@]}"; do
+    if grep -qiE '^[[:space:]]*Port[[:space:]]+[0-9]+' "$f" 2>/dev/null; then
+      # Только активные строки (комментарии отсекаем до извлечения цифр)
+      grep -iE '^[[:space:]]*Port[[:space:]]+[0-9]+' "$f" 2>/dev/null \
+        | sed 's/#.*//' | grep -oE '[0-9]+' >> "$tmp_sources"
+      SSH_PORT_SOURCE="${SSH_PORT_SOURCE:+$SSH_PORT_SOURCE, }$f"
+    fi
+  done
+  
+  local port_list
+  port_list=$(sort -un "$tmp_sources" 2>/dev/null | tr '\n' ',' | sed 's/,$//')
+  rm -f "$tmp_sources"
+  
+  if [ -z "$port_list" ]; then
+    SSH_PORT_SOURCE=""
+    echo "22"
+  else
+    echo "$port_list"
+  fi
+  return 0
+}
+
 function detect_ssh_port() {
-  SSH_PORT=$(grep -Po '(?<=^Port )\d+' /etc/ssh/sshd_config | head -n1)
-  SSH_PORT=${SSH_PORT:-22}
+  SSH_PORTS=$(get_ssh_ports)
+  SSH_PORT=${SSH_PORTS%%,*}
   echo -e "${CYAN}Detected SSH port:${NC} ${GREEN}$SSH_PORT${NC}"
+  if [[ "$SSH_PORTS" == *","* ]]; then
+    echo -e "${CYAN}SSH слушает несколько портов:${NC} ${GREEN}$SSH_PORTS${NC}"
+  fi
+  [ -n "$SSH_PORT_SOURCE" ] && echo -e "${GRAY}Источник порта: ${SSH_PORT_SOURCE}${NC}"
 }
 
 function check_ssh_port_consistency() {
   echo -e "${YELLOW}Checking SSH port consistency...${NC}"
   
-  # Получаем текущий SSH порт
-  CURRENT_SSH_PORT=$(grep -Po '(?<=^Port )\d+' /etc/ssh/sshd_config | head -n1)
-  CURRENT_SSH_PORT=${CURRENT_SSH_PORT:-22}
+  # Порты SSH с учётом drop-in конфигов sshd_config.d
+  CURRENT_SSH_PORTS=$(get_ssh_ports)
+  CURRENT_SSH_PORT=${CURRENT_SSH_PORTS%%,*}
   
   # Получаем порт из конфига fail2ban
   F2B_SSH_PORT=""
@@ -2671,21 +2732,35 @@ function check_ssh_port_consistency() {
     F2B_SSH_PORT=$(grep -A 10 "\[sshd\]" "$JAIL_LOCAL" | grep "^port" | cut -d'=' -f2 | tr -d ' ')
   fi
   
-  echo -e "${CYAN}Current SSH port:${NC} ${GREEN}$CURRENT_SSH_PORT${NC}"
+  echo -e "${CYAN}Current SSH port(s):${NC} ${GREEN}$CURRENT_SSH_PORTS${NC}"
+  [ -n "$SSH_PORT_SOURCE" ] && echo -e "${GRAY}Источник: $SSH_PORT_SOURCE${NC}"
   echo -e "${CYAN}Fail2ban SSH port:${NC} ${GREEN}${F2B_SSH_PORT:-"not configured"}${NC}"
   
-  if [ -n "$F2B_SSH_PORT" ] && [ "$CURRENT_SSH_PORT" != "$F2B_SSH_PORT" ]; then
-    echo -e "${RED}⚠️  WARNING: SSH port mismatch detected!${NC}"
-    echo -e "${YELLOW}Fail2ban is monitoring port $F2B_SSH_PORT, but SSH is running on port $CURRENT_SSH_PORT${NC}"
-    echo ""
-    echo -e "${CYAN}Do you want to update fail2ban configuration? (y/n):${NC}"
-    read -r response
-    if [[ "$response" =~ ^[Yy]$ ]]; then
-      update_fail2ban_ssh_port "$CURRENT_SSH_PORT"
-      return 0
+  if [ -n "$F2B_SSH_PORT" ]; then
+    # F2B должен покрывать все активные порты SSH
+    local uncovered="" p
+    for p in ${CURRENT_SSH_PORTS//,/ }; do
+      if [[ ",${F2B_SSH_PORT// /}," != *",$p,"* ]]; then
+        uncovered="${uncovered}${uncovered:+, }$p"
+      fi
+    done
+    
+    if [ -n "$uncovered" ]; then
+      echo -e "${RED}⚠️  WARNING: SSH port mismatch detected!${NC}"
+      echo -e "${YELLOW}Fail2ban is monitoring: $F2B_SSH_PORT, but SSH also listens on: $uncovered${NC}"
+      echo ""
+      echo -e "${CYAN}Do you want to update fail2ban configuration? (y/n):${NC}"
+      read -r response
+      if [[ "$response" =~ ^[Yy]$ ]]; then
+        update_fail2ban_ssh_port "$CURRENT_SSH_PORTS"
+        return 0
+      else
+        echo -e "${YELLOW}Port mismatch not fixed. Fail2ban may not work correctly.${NC}"
+        return 1
+      fi
     else
-      echo -e "${YELLOW}Port mismatch not fixed. Fail2ban may not work correctly.${NC}"
-      return 1
+      echo -e "${GREEN}✓ SSH ports are consistent${NC}"
+      return 0
     fi
   else
     echo -e "${GREEN}✓ SSH ports are consistent${NC}"
@@ -2798,23 +2873,33 @@ function allow_firewall_port() {
   # Определяем ОС для выбора подходящего файервола
   detect_os
   
+  # Открываем ВСЕ порты SSH (основной конфиг + drop-in'ы sshd_config.d)
+  local ports="${SSH_PORTS:-}"
+  [ -z "$ports" ] && ports=$(get_ssh_ports)
+  
   if command -v ufw > /dev/null; then
     # Ubuntu/Debian с UFW
-    ufw allow "$SSH_PORT"/tcp || true
-    echo -e "${YELLOW}UFW: allowed SSH port $SSH_PORT${NC}"
+    for p in ${ports//,/ }; do
+      ufw allow "$p"/tcp || true
+    done
+    echo -e "${YELLOW}UFW: allowed SSH ports: $ports${NC}"
   elif command -v firewall-cmd > /dev/null; then
     # RHEL/CentOS/AlmaLinux/Rocky с firewalld
-    firewall-cmd --permanent --add-port="$SSH_PORT"/tcp || true
+    for p in ${ports//,/ }; do
+      firewall-cmd --permanent --add-port="$p"/tcp || true
+    done
     firewall-cmd --reload || true
-    echo -e "${YELLOW}Firewalld: allowed SSH port $SSH_PORT${NC}"
+    echo -e "${YELLOW}Firewalld: allowed SSH ports: $ports${NC}"
   elif command -v iptables > /dev/null; then
     # Fallback к iptables
-    iptables -A INPUT -p tcp --dport "$SSH_PORT" -j ACCEPT || true
-    echo -e "${YELLOW}iptables: allowed SSH port $SSH_PORT${NC}"
+    for p in ${ports//,/ }; do
+      iptables -A INPUT -p tcp --dport "$p" -j ACCEPT || true
+    done
+    echo -e "${YELLOW}iptables: allowed SSH ports: $ports${NC}"
     echo -e "${CYAN}Note: iptables rules may not persist after reboot${NC}"
   else
     echo -e "${YELLOW}No supported firewall found (ufw/firewalld/iptables)${NC}"
-    echo -e "${CYAN}Please manually allow SSH port $SSH_PORT in your firewall${NC}"
+    echo -e "${CYAN}Please manually allow SSH ports $ports in your firewall${NC}"
   fi
 }
 
