@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Версия скрипта
-SCRIPT_VERSION="3.7.5"
+SCRIPT_VERSION="3.8.0"
 VERSION_CHECK_URL="https://raw.githubusercontent.com/DigneZzZ/dignezzz.github.io/main/server/f2b.sh"
 
 # Константы путей конфигурации
@@ -145,9 +145,11 @@ if [[ "$(basename "$0")" == "f2b" ]] && [[ $# -gt 0 ]]; then
       ;;
     enable)
       if [ -n "$2" ]; then
-        echo "Use the main interactive menu to enable jails: f2b"
+        # Быстрое включение защиты сервиса: sshd, nginx, haproxy, caddy, mysql
+        exec "$0" --enable-service "$2"
       else
-        echo "Usage: f2b enable <jail_name>"
+        echo "Usage: f2b enable <service_name>"
+        echo "Supported: sshd, nginx, haproxy, caddy, mysql, phpmyadmin"
       fi
       exit 0
       ;;
@@ -200,7 +202,7 @@ if [[ "$(basename "$0")" == "f2b" ]] && [[ $# -gt 0 ]]; then
       echo "  f2b banned [jail]             - Show banned IPs (all or specific jail)"
       echo "  f2b unban <IP> [jail]         - Unban IP from all jails or specific jail"
       echo "  f2b unban-all [jail]          - Unban all IPs from all or specific jail"
-      echo "  f2b enable <jail>             - Enable specific jail"
+      echo "  f2b enable <service>          - Quick enable service jail (sshd, nginx, haproxy, caddy, mysql)"
       echo "  f2b disable <jail>            - Disable specific jail"
       echo "  f2b recent                    - Show recent bans"
       echo "  f2b check-ports               - Check SSH port consistency"
@@ -217,6 +219,7 @@ if [[ "$(basename "$0")" == "f2b" ]] && [[ $# -gt 0 ]]; then
       echo "  f2b unban 1.2.3.4             - Unban IP from all jails"
       echo "  f2b unban 1.2.3.4 nginx      - Unban IP from nginx jail only"
       echo "  f2b log nginx                 - Show nginx jail logs"
+      echo "  f2b enable haproxy            - Quick enable HAProxy protection"
       exit 0
       ;;
   esac
@@ -560,6 +563,25 @@ function scan_all_logs() {
   scan_caddy_logs
   echo ""
   
+  # HAProxy
+  echo -e "${BLUE}HAProxy:${NC}"
+  if is_service_installed "haproxy"; then
+    local haproxy_logs
+    haproxy_logs=$(get_haproxy_log_path)
+    if [ "$haproxy_logs" = "systemd" ]; then
+      save_log_to_registry "haproxy" "systemd"
+      echo -e "  ${CYAN}${ICON_INFO}${NC} systemd journal"
+    elif [ -n "$haproxy_logs" ]; then
+      save_log_to_registry "haproxy" "$haproxy_logs"
+      echo -e "  ${GREEN}${ICON_CHECK}${NC} $haproxy_logs"
+    else
+      echo -e "  ${YELLOW}${ICON_WARNING}${NC} лог не найден (настроить: f2b enable haproxy)"
+    fi
+  else
+    echo -e "  ${GRAY}Не установлен${NC}"
+  fi
+  echo ""
+  
   # MySQL
   echo -e "${BLUE}MySQL/MariaDB:${NC}"
   if [ -f "/var/log/mysql/error.log" ]; then
@@ -654,7 +676,7 @@ function show_statistics() {
       # Web Services  
       local web_services_found=false
       for jail in ${jails//,/ }; do
-        if [[ "$jail" =~ ^(nginx|caddy|phpmyadmin).*$ ]]; then
+        if [[ "$jail" =~ ^(nginx|caddy|haproxy|phpmyadmin).*$ ]]; then
           if [ "$web_services_found" = false ]; then
             echo -e "  ${BOLD}${PURPLE}🌐 Web Сервисы:${NC}"
             web_services_found=true
@@ -678,7 +700,7 @@ function show_statistics() {
       # Other Services
       local other_services_found=false
       for jail in ${jails//,/ }; do
-        if ! [[ "$jail" =~ ^(sshd|ssh|nginx|apache|caddy|httpd|wordpress|phpmyadmin|roundcube|postfix|dovecot|exim|sendmail|mysql|mariadb|postgresql|mongo|vsftpd|proftpd|pureftpd|ftp).*$ ]]; then
+        if ! [[ "$jail" =~ ^(sshd|ssh|nginx|apache|caddy|haproxy|httpd|wordpress|phpmyadmin|roundcube|postfix|dovecot|exim|sendmail|mysql|mariadb|postgresql|mongo|vsftpd|proftpd|pureftpd|ftp).*$ ]]; then
           if [ "$other_services_found" = false ]; then
             echo -e "  ${BOLD}${GRAY}${ICON_GEAR} Прочие сервисы:${NC}"
             other_services_found=true
@@ -841,6 +863,18 @@ function get_jail_logpath() {
         return
       fi
       for p in /var/log/caddy/access.log /var/log/caddy/caddy.log; do
+        [ -f "$p" ] && { echo "$p"; return; }
+      done
+      ;;
+    haproxy|haproxy-*)
+      # Используем реестр или стандартные пути
+      local hap_reg
+      hap_reg=$(get_log_from_registry "haproxy")
+      if [ -n "$hap_reg" ]; then
+        echo "$hap_reg"
+        return
+      fi
+      for p in /var/log/haproxy.log /var/log/haproxy/haproxy.log /var/log/haproxy/access.log; do
         [ -f "$p" ] && { echo "$p"; return; }
       done
       ;;
@@ -1100,15 +1134,16 @@ function manage_services_menu() {
     
     echo -e "${CYAN} 1.${NC} SSH Protection (sshd)"
     echo -e "${CYAN} 2.${NC} Nginx Protection"
-    echo -e "${CYAN} 3.${NC} Caddy Protection"
-    echo -e "${CYAN} 4.${NC} MySQL/MariaDB Protection"
-    echo -e "${CYAN} 5.${NC} PhpMyAdmin Protection"
-    echo -e "${CYAN} 6.${NC} Custom Service Management"
-    echo -e "${CYAN} 7.${NC} View All Jail Configurations"
-    echo -e "${CYAN} 8.${NC} ${ICON_GEAR} Detect Installed Services"
+    echo -e "${CYAN} 3.${NC} HAProxy Protection"
+    echo -e "${CYAN} 4.${NC} Caddy Protection"
+    echo -e "${CYAN} 5.${NC} MySQL/MariaDB Protection"
+    echo -e "${CYAN} 6.${NC} PhpMyAdmin Protection"
+    echo -e "${CYAN} 7.${NC} Custom Service Management"
+    echo -e "${CYAN} 8.${NC} View All Jail Configurations"
+    echo -e "${CYAN} 9.${NC} ${ICON_GEAR} Detect Installed Services"
     echo -e "${RED} 0.${NC} Back to Main Menu"
     echo ""
-    echo -ne "${YELLOW}Select service [0-8]:${NC} "
+    echo -ne "${YELLOW}Select service [0-9]:${NC} "
     
     read -r choice
     echo ""
@@ -1116,12 +1151,13 @@ function manage_services_menu() {
     case $choice in
       1) manage_service_jail "sshd" "SSH" ;;
       2) manage_service_jail "nginx" "Nginx Web Server" ;;
-      3) manage_service_jail "caddy" "Caddy Web Server" ;;
-      4) manage_service_jail "mysql" "MySQL/MariaDB Database" ;;
-      5) manage_service_jail "phpmyadmin" "PhpMyAdmin" ;;
-      6) custom_service_management ;;
-      7) show_all_jail_configs ;;
-      8) show_detected_services ;;
+      3) manage_service_jail "haproxy" "HAProxy" ;;
+      4) manage_service_jail "caddy" "Caddy Web Server" ;;
+      5) manage_service_jail "mysql" "MySQL/MariaDB Database" ;;
+      6) manage_service_jail "phpmyadmin" "PhpMyAdmin" ;;
+      7) custom_service_management ;;
+      8) show_all_jail_configs ;;
+      9) show_detected_services ;;
       0) return ;;
       *) echo -e "${RED}Invalid option${NC}" ;;
     esac
@@ -1461,6 +1497,82 @@ EOF
       # backend = auto чтобы читать из файлов, а не journald
       add_jail_config "$service" "enabled = true" "port = http,https" "filter = caddy-auth" "backend = auto" "logpath = $f2b_logpath" "maxretry = 3" "bantime = 600"
       ;;
+    "haproxy")
+      local haproxy_cfg
+      haproxy_cfg=$(get_haproxy_cfg_path)
+      
+      # Показываем параметры, определённые из конфига HAProxy
+      analyze_haproxy_config "$haproxy_cfg"
+      
+      # Создаём фильтр
+      create_haproxy_filter
+      
+      # Порты фронтендов (из bind-директив, включая stats)
+      local haproxy_ports
+      haproxy_ports=$(get_haproxy_ports "$haproxy_cfg")
+      if [ -z "$haproxy_cfg" ] || [ ! -f "$haproxy_cfg" ]; then
+        echo -ne "${CYAN}Конфиг не найден. Введите порты HAProxy вручную (Enter = 80,443):${NC} "
+        read -r manual_ports
+        [ -n "$manual_ports" ] && haproxy_ports="$manual_ports"
+      fi
+      echo -e "${GREEN}${ICON_CHECK} Порты фронтендов: ${haproxy_ports}${NC}"
+      
+      # Определяем логи
+      local haproxy_log
+      haproxy_log=$(get_haproxy_log_path)
+      
+      if [ -z "$haproxy_log" ]; then
+        # rsyslog активен, но выделенного лога нет
+        if haproxy_has_log_directive "$haproxy_cfg"; then
+          echo -e "${CYAN}${ICON_INFO} Настраиваем rsyslog: логи HAProxy → /var/log/haproxy.log${NC}"
+          if setup_haproxy_rsyslog; then
+            haproxy_log="/var/log/haproxy.log"
+            echo -e "${GREEN}${ICON_CHECK} rsyslog настроен (+ logrotate)${NC}"
+          fi
+        else
+          # HAProxy вообще не пишет логи
+          echo -e "${YELLOW}${ICON_WARNING} В haproxy.cfg нет директивы log — HAProxy не пишет логи${NC}"
+          echo -ne "${CYAN}Добавить 'log /dev/log local0' в global-секцию и перезапустить HAProxy? (Y/n):${NC} "
+          read -r response
+          if [[ -z "$response" || "$response" =~ ^[Yy]$ ]]; then
+            if enable_haproxy_logging "$haproxy_cfg"; then
+              setup_haproxy_rsyslog && haproxy_log="/var/log/haproxy.log"
+              systemctl try-restart haproxy 2>/dev/null || systemctl restart haproxy 2>/dev/null || true
+              echo -e "${GREEN}${ICON_CHECK} HAProxy перезапущен с логированием${NC}"
+            fi
+          fi
+        fi
+      fi
+      
+      # Последний шанс — ручной ввод
+      if [ -z "$haproxy_log" ]; then
+        echo -ne "${CYAN}Введите путь к логу HAProxy (Enter = systemd journal):${NC} "
+        read -r manual_path
+        if [ -n "$manual_path" ]; then
+          haproxy_log="$manual_path"
+        else
+          haproxy_log="systemd"
+        fi
+      fi
+      
+      echo -e "${GREEN}${ICON_CHECK} Используем лог: ${haproxy_log}${NC}"
+      save_log_to_registry "haproxy" "$haproxy_log"
+      
+      if is_service_in_docker "haproxy"; then
+        echo -e "${GRAY}   HAProxy в Docker: убедитесь, что логи видны на хосте (volume или journald-драйвер)${NC}"
+      fi
+      
+      if [ "$haproxy_log" = "systemd" ]; then
+        # journalmatch берётся из фильтра (_SYSTEMD_UNIT=haproxy.service)
+        add_jail_config "haproxy" "enabled = true" "port = $haproxy_ports" \
+          "filter = haproxy-ban" "backend = systemd" \
+          "maxretry = 5" "findtime = 10m" "bantime = 1h"
+      else
+        add_jail_config "haproxy" "enabled = true" "port = $haproxy_ports" \
+          "filter = haproxy-ban" "backend = auto" "logpath = $haproxy_log" \
+          "maxretry = 5" "findtime = 10m" "bantime = 1h"
+      fi
+      ;;
     "mysql")
       local mysql_log
       mysql_log=$(get_mysql_log_path)
@@ -1483,6 +1595,11 @@ EOF
       ;;
     "phpmyadmin")
       add_jail_config "phpmyadmin-syslog" "enabled = true" "port = http,https" "filter = phpmyadmin-syslog" "logpath = /var/log/syslog" "maxretry = 3" "bantime = 600"
+      ;;
+    *)
+      echo -e "${RED}Неизвестный сервис: $service${NC}"
+      echo -e "Поддерживаются: sshd, nginx, haproxy, caddy, mysql, phpmyadmin"
+      return 1
       ;;
   esac
 }
@@ -1871,6 +1988,11 @@ function is_service_installed() {
     caddy)
       command -v caddy &>/dev/null && return 0
       ;;
+    haproxy)
+      command -v haproxy &>/dev/null && return 0
+      [ -f "/etc/haproxy/haproxy.cfg" ] && return 0
+      systemctl list-unit-files 2>/dev/null | grep -q '^haproxy\.service' && return 0
+      ;;
     mysql|mariadb)
       command -v mysql &>/dev/null || command -v mariadb &>/dev/null && return 0
       ;;
@@ -2093,12 +2215,341 @@ EOF
   fi
 }
 
+# ═══════════════════════════════════════════════════════════════════
+# HAPROXY: АВТОДЕТЕКТ И ЗАЩИТА
+# ═══════════════════════════════════════════════════════════════════
+
+# Найти конфиг HAProxy (нативный или Docker volume)
+function get_haproxy_cfg_path() {
+  local cfg_paths=(
+    "/etc/haproxy/haproxy.cfg"
+    "/etc/haproxy/haproxy.cfg.d/50-aggregated.cfg"
+    "/usr/local/etc/haproxy/haproxy.cfg"
+  )
+  for path in "${cfg_paths[@]}"; do
+    [ -f "$path" ] && { echo "$path"; return 0; }
+  done
+  
+  # Docker volumes и популярные альтернативные пути
+  local docker_cfg_patterns=(
+    "/var/lib/docker/volumes/*haproxy*/_data/haproxy.cfg"
+    "/opt/docker/haproxy/haproxy.cfg"
+    "$HOME/docker/haproxy/haproxy.cfg"
+  )
+  for pattern in "${docker_cfg_patterns[@]}"; do
+    local found_path
+    found_path=$(compgen -G "$pattern" 2>/dev/null | head -1)
+    if [ -n "$found_path" ] && [ -f "$found_path" ]; then
+      echo "$found_path"
+      return 0
+    fi
+  done
+  
+  return 1
+}
+
+# Извлечь порты фронтендов из haproxy.cfg (директивы bind)
+function get_haproxy_ports() {
+  local cfg="$1"
+  local ports=""
+  
+  if [ -n "$cfg" ] && [ -f "$cfg" ]; then
+    ports=$(grep -E '^[[:space:]]*bind[[:space:]]' "$cfg" 2>/dev/null \
+      | grep -oP '(?<=:)\d+' \
+      | sort -un | tr '\n' ',' | sed 's/,$//')
+  fi
+  
+  echo "${ports:-80,443}"
+}
+
+# Проверить наличие директивы log в haproxy.cfg
+function haproxy_has_log_directive() {
+  local cfg="$1"
+  [ -n "$cfg" ] && [ -f "$cfg" ] && grep -qE '^[[:space:]]*log[[:space:]]' "$cfg"
+}
+
+# Автодетект пути к логам HAProxy
+# Возвращает: путь к файлу, "systemd" (journald) или "" (нужна настройка rsyslog)
+function get_haproxy_log_path() {
+  # 1. Реестр
+  local from_registry
+  from_registry=$(get_log_from_registry "haproxy")
+  if [ -n "$from_registry" ]; then
+    echo "$from_registry"
+    return 0
+  fi
+  
+  # 2. Выделенные лог-файлы
+  local log_paths=(
+    "/var/log/haproxy.log"
+    "/var/log/haproxy/haproxy.log"
+    "/var/log/haproxy/access.log"
+    "/usr/local/haproxy/logs/haproxy.log"
+  )
+  for path in "${log_paths[@]}"; do
+    if [ -f "$path" ]; then
+      echo "$path"
+      return 0
+    fi
+  done
+  
+  # 3. Docker volumes
+  local docker_paths=(
+    "/var/lib/docker/volumes/*haproxy*/_data/logs/*.log"
+    "/opt/docker/haproxy/logs/*.log"
+  )
+  for pattern in "${docker_paths[@]}"; do
+    local found_path
+    found_path=$(compgen -G "$pattern" 2>/dev/null | head -1)
+    if [ -n "$found_path" ] && [ -f "$found_path" ]; then
+      echo "$found_path"
+      return 0
+    fi
+  done
+  
+  # 4. Нет rsyslog — логи только в journald
+  if ! systemctl is-active --quiet rsyslog 2>/dev/null; then
+    echo "systemd"
+    return 0
+  fi
+  
+  # rsyslog активен, но выделенного лога нет — нужна настройка
+  echo ""
+  return 1
+}
+
+# Настроить выделенный лог HAProxy через rsyslog (/var/log/haproxy.log)
+function setup_haproxy_rsyslog() {
+  local rsyslog_cfg="/etc/rsyslog.d/49-haproxy.conf"
+  
+  if [ ! -d "/etc/rsyslog.d" ]; then
+    echo -e "${RED}${ICON_CROSS} /etc/rsyslog.d не найден${NC}"
+    return 1
+  fi
+  
+  cat > "$rsyslog_cfg" <<'EOF'
+# Created by f2b.sh — dedicated HAProxy log for Fail2ban
+if ($programname == 'haproxy') then /var/log/haproxy.log
+& stop
+EOF
+  
+  # fail2ban требует существующий файл лога
+  touch /var/log/haproxy.log
+  chmod 640 /var/log/haproxy.log 2>/dev/null
+  
+  # logrotate
+  if [ -d "/etc/logrotate.d" ] && [ ! -f "/etc/logrotate.d/haproxy-f2b" ]; then
+    cat > "/etc/logrotate.d/haproxy-f2b" <<'EOF'
+/var/log/haproxy.log {
+    daily
+    rotate 7
+    missingok
+    notifempty
+    compress
+    delaycompress
+    postrotate
+        systemctl kill -s HUP rsyslog.service >/dev/null 2>&1 || killall -HUP rsyslogd >/dev/null 2>&1 || true
+    endscript
+}
+EOF
+  fi
+  
+  systemctl restart rsyslog 2>/dev/null || systemctl reload rsyslog 2>/dev/null || true
+  return 0
+}
+
+# Добавить директиву log в global-секцию haproxy.cfg (с бэкапом и валидацией)
+function enable_haproxy_logging() {
+  local cfg="$1"
+  
+  if [ -z "$cfg" ] || [ ! -f "$cfg" ]; then
+    return 1
+  fi
+  
+  cp "$cfg" "${cfg}.bak_f2b_$(date +%Y%m%d_%H%M%S)"
+  
+  if grep -qE '^[[:space:]]*global\b' "$cfg"; then
+    sed -i '/^[[:space:]]*global\b/a\    log /dev/log local0' "$cfg"
+  else
+    # Нет global секции — создаём в начале файла
+    sed -i '1i global\n    log /dev/log local0' "$cfg"
+  fi
+  
+  # Валидация конфига, откат при ошибке
+  if command -v haproxy &>/dev/null; then
+    if haproxy -c -f "$cfg" &>/dev/null; then
+      echo -e "${GREEN}${ICON_CHECK} Конфиг HAProxy валиден${NC}"
+    else
+      echo -e "${RED}${ICON_CROSS} Ошибка конфига HAProxy! Откат изменений${NC}"
+      local backup
+      backup=$(ls -t "${cfg}".bak_f2b_* 2>/dev/null | head -1)
+      [ -n "$backup" ] && cp "$backup" "$cfg"
+      return 1
+    fi
+  fi
+  
+  return 0
+}
+
+# Создание фильтра для HAProxy (401/403/429 в HTTP-логах)
+function create_haproxy_filter() {
+  local filter_file="${F2B_FILTER_DIR}/haproxy-ban.conf"
+  
+  if [ ! -d "$F2B_FILTER_DIR" ]; then
+    mkdir -p "$F2B_FILTER_DIR"
+  fi
+  
+  cat > "$filter_file" <<'EOF'
+# Fail2Ban filter for HAProxy
+# Matches failed auth and "bad" HTTP statuses (401/403/429) in HAProxy logs
+#
+# HTTP log format (syslog):
+# Feb  6 12:12:12 host haproxy[20888]: 10.0.0.1:54321 [06/Feb/2023:12:12:12.123] fnt bck/srv 10/0/30/12/52 401 212 - - ---- 3/1/0/1/0 0/0 "GET /path HTTP/1.1"
+#
+# Note: TCP-mode frontends log without status codes and are not matched.
+
+[INCLUDES]
+before = common.conf
+
+[Definition]
+
+_daemon = haproxy
+
+failregex = ^%(__prefix_line)s<HOST>:\d+\s+\[.*?\]\s+\S+\s+\S+\s+\S+\s+(?:401|403|429)\s+\d+\s
+            ^haproxy\[\d+\]:\s+<HOST>:\d+\s+\[.*?\]\s+\S+\s+\S+\s+\S+\s+(?:401|403|429)\s+\d+\s
+
+# Используется при backend = systemd
+journalmatch = _SYSTEMD_UNIT=haproxy.service
+
+ignoreregex =
+
+# Author: f2b.sh auto-generated for HAProxy logs
+EOF
+  echo -e "${GREEN}${ICON_CHECK} Создан/обновлён фильтр HAProxy: ${filter_file}${NC}"
+  return 0
+}
+
+# Показать параметры HAProxy из его конфига
+function analyze_haproxy_config() {
+  local cfg="$1"
+  
+  echo -e "${CYAN}${ICON_GEAR} Параметры HAProxy:${NC}"
+  
+  if [ -z "$cfg" ] || [ ! -f "$cfg" ]; then
+    echo -e "  ${YELLOW}${ICON_WARNING} Конфиг HAProxy не найден${NC}"
+    return 1
+  fi
+  
+  echo -e "  ${GRAY}Конфиг:${NC} $cfg"
+  
+  local frontends
+  frontends=$(grep -cE '^[[:space:]]*frontend[[:space:]]' "$cfg" 2>/dev/null)
+  echo -e "  ${GRAY}Фронтенды:${NC} ${frontends:-0}"
+  
+  local ports
+  ports=$(get_haproxy_ports "$cfg")
+  echo -e "  ${GRAY}Порты фронтендов (bind):${NC} ${GREEN}${ports}${NC}"
+  
+  local mode_http mode_tcp
+  mode_http=$(grep -cE '^[[:space:]]*mode[[:space:]]+http' "$cfg" 2>/dev/null)
+  mode_tcp=$(grep -cE '^[[:space:]]*mode[[:space:]]+tcp' "$cfg" 2>/dev/null)
+  echo -e "  ${GRAY}Режимы:${NC} http=${mode_http:-0}, tcp=${mode_tcp:-0}"
+  if [ "${mode_tcp:-0}" -gt 0 ] && [ "${mode_http:-0}" -eq 0 ]; then
+    echo -e "  ${YELLOW}${ICON_WARNING} Только tcp-фронтенды: фильтр по статус-кодам (401/403) не сработает${NC}"
+  fi
+  
+  if haproxy_has_log_directive "$cfg"; then
+    local log_line
+    log_line=$(grep -E '^[[:space:]]*log[[:space:]]' "$cfg" | head -1 | sed 's/^[[:space:]]*//')
+    echo -e "  ${GREEN}${ICON_CHECK} Логирование:${NC} ${log_line}"
+  else
+    echo -e "  ${RED}${ICON_CROSS} Логирование: не настроено (нет директивы log)${NC}"
+  fi
+  
+  if grep -qE '^[[:space:]]*stats[[:space:]]' "$cfg" 2>/dev/null; then
+    echo -e "  ${GREEN}${ICON_CHECK} Stats endpoint: настроен (порт включён в бан-правила)${NC}"
+  fi
+  
+  return 0
+}
+
+# Быстрое включение защиты HAProxy (без меню)
+function quick_enable_haproxy_protection() {
+  echo -e "${BOLD}${CYAN}${ICON_ROCKET} БЫСТРАЯ НАСТРОЙКА ЗАЩИТЫ HAPROXY${NC}"
+  echo ""
+  
+  create_service_jail_config "haproxy" || return 1
+  
+  systemctl reload fail2ban 2>/dev/null || systemctl restart fail2ban
+  sleep 2
+  
+  if fail2ban-client status haproxy &>/dev/null; then
+    echo ""
+    echo -e "${GREEN}${ICON_CHECK} Защита HAProxy включена (jail: haproxy)${NC}"
+    return 0
+  else
+    echo -e "${RED}${ICON_CROSS} Не удалось включить jail haproxy${NC}"
+    echo -e "${GRAY}Проверьте конфигурацию: journalctl -u fail2ban --no-pager | tail -20${NC}"
+    return 1
+  fi
+}
+
+# Отображаемое имя сервиса для CLI/меню
+function get_service_display_name() {
+  case "$1" in
+    sshd) echo "SSH" ;;
+    nginx) echo "Nginx" ;;
+    haproxy) echo "HAProxy" ;;
+    caddy) echo "Caddy" ;;
+    mysql) echo "MySQL/MariaDB" ;;
+    phpmyadmin) echo "PhpMyAdmin" ;;
+    *) echo "$1" ;;
+  esac
+}
+
+# Автодетект установленных сервисов во время установки f2b (быстрое добавление)
+function auto_detect_and_enable_services() {
+  echo -e "${BOLD}${CYAN}${ICON_GEAR} АВТОДЕТЕКТ ДОПОЛНИТЕЛЬНЫХ СЕРВИСОВ${NC}"
+  echo ""
+  
+  if ! is_f2b_running; then
+    echo -e "${RED}${ICON_CROSS} Fail2ban не запущен, пропускаем автодетект${NC}"
+    return 1
+  fi
+  
+  local detected_any=false
+  
+  # HAProxy
+  if is_service_installed "haproxy"; then
+    detected_any=true
+    if fail2ban-client status haproxy &>/dev/null; then
+      echo -e "${GREEN}${ICON_CHECK} HAProxy: защита уже включена${NC}"
+    else
+      local haproxy_mode="нативно"
+      is_service_in_docker "haproxy" && haproxy_mode="Docker"
+      echo -e "${CYAN}${ICON_INFO} Обнаружен HAProxy (${haproxy_mode})${NC}"
+      echo -ne "   Включить защиту (блокировка брутфорса по 401/403)? ${DIM}[Y/n]:${NC} "
+      read -r response
+      if [[ -z "$response" || "$response" =~ ^[Yy]$ ]]; then
+        quick_enable_haproxy_protection
+      else
+        echo -e "${GRAY}   Пропущено. Позже: f2b enable haproxy${NC}"
+      fi
+    fi
+  fi
+  
+  if [ "$detected_any" = false ]; then
+    echo -e "${GRAY}Дополнительные сервисы (HAProxy, Nginx, Caddy...) не обнаружены${NC}"
+  fi
+  echo ""
+}
+
 # Показать информацию о найденных сервисах
 function show_detected_services() {
   echo -e "${BOLD}${CYAN}${ICON_GEAR} Обнаруженные сервисы:${NC}"
   echo ""
   
-  local services=("nginx" "caddy" "mysql" "mariadb")
+  local services=("nginx" "caddy" "haproxy" "mysql" "mariadb")
   
   for service in "${services[@]}"; do
     local status_icon="${RED}${ICON_CROSS}${NC}"
@@ -2124,6 +2575,9 @@ function show_detected_services() {
         caddy)
           location=$(get_caddy_log_path)
           ;;
+        haproxy)
+          location=$(get_haproxy_log_path)
+          ;;
         mysql|mariadb)
           location=$(get_mysql_log_path)
           ;;
@@ -2131,14 +2585,14 @@ function show_detected_services() {
     fi
     
     echo -e "  ${status_icon} ${BOLD}${service}${NC}: ${status_text}"
-    if [ -n "$location" ] && [ "$location" != "systemd-journal" ]; then
+    if [ "$location" = "systemd" ] || [ "$location" = "systemd-journal" ]; then
+      echo -e "     ${DIM}Лог: systemd journal${NC}"
+    elif [ -n "$location" ]; then
       if [ -f "$location" ]; then
         echo -e "     ${DIM}Лог: ${location}${NC}"
       else
         echo -e "     ${YELLOW}Лог не найден: ${location}${NC}"
       fi
-    elif [ "$location" = "systemd-journal" ]; then
-      echo -e "     ${DIM}Лог: systemd journal${NC}"
     fi
   done
   echo ""
@@ -2494,20 +2948,25 @@ case "$1" in
     echo ""
     
     # Шаг 1: Установка Fail2ban
-    echo -e "${BLUE}[${CYAN}1/3${BLUE}]${NC} ${ICON_INFO} Установка пакета Fail2ban..."
+    echo -e "${BLUE}[${CYAN}1/4${BLUE}]${NC} ${ICON_INFO} Установка пакета Fail2ban..."
     install_fail2ban
     echo ""
     
     # Шаг 2: Настройка SSH защиты
-    echo -e "${BLUE}[${CYAN}2/3${BLUE}]${NC} ${ICON_GEAR} Настройка SSH защиты..."
+    echo -e "${BLUE}[${CYAN}2/4${BLUE}]${NC} ${ICON_GEAR} Настройка SSH защиты..."
     detect_ssh_port
     backup_and_configure_fail2ban
     restart_fail2ban
     allow_firewall_port
     echo ""
     
-    # Шаг 3: Установка скрипта в систему
-    echo -e "${BLUE}[${CYAN}3/3${BLUE}]${NC} ${ICON_ROCKET} Установка команды f2b..."
+    # Шаг 3: Автодетект сервисов (HAProxy и др.)
+    echo -e "${BLUE}[${CYAN}3/4${BLUE}]${NC} ${ICON_GEAR} Автодетект дополнительных сервисов..."
+    auto_detect_and_enable_services
+    echo ""
+    
+    # Шаг 4: Установка скрипта в систему
+    echo -e "${BLUE}[${CYAN}4/4${BLUE}]${NC} ${ICON_ROCKET} Установка команды f2b..."
     if install_script_to_system "$VERSION_CHECK_URL"; then
       echo ""
       echo -e "${BOLD}${GREEN}${ICON_CHECK} УСТАНОВКА ЗАВЕРШЕНА!${NC}"
@@ -2545,6 +3004,11 @@ case "$1" in
     check_ssh_port_consistency
     exit $?
     ;;
+  --enable-service|enable)
+    check_root
+    enable_service_jail "$2" "$(get_service_display_name "$2")"
+    exit $?
+    ;;
   --menu)
     # Принудительный интерактивный режим
     check_root
@@ -2571,6 +3035,7 @@ case "$1" in
     echo "  --install-system [URL] Install only f2b script to system (/usr/local/bin/f2b)"
     echo "  --uninstall-system     Remove f2b script from system"
     echo "  --menu                 Force interactive menu (skip auto-install)"
+    echo "  --enable-service <svc> Quick enable service jail (haproxy, nginx, caddy, mysql)"
     echo "  --check-ports          Check SSH port consistency"
     echo "  --version, -v          Show version"
     echo "  --check-update         Check for script updates"
@@ -2605,24 +3070,29 @@ case "$1" in
       
       # Шаг 1: Установка Fail2ban (если не установлен)
       if [ "$is_update" = false ]; then
-        echo -e "${BLUE}[${CYAN}1/3${BLUE}]${NC} ${ICON_INFO} Установка Fail2ban..."
+        echo -e "${BLUE}[${CYAN}1/4${BLUE}]${NC} ${ICON_INFO} Установка Fail2ban..."
         install_fail2ban
         echo ""
       else
-        echo -e "${BLUE}[${CYAN}1/3${BLUE}]${NC} ${GREEN}${ICON_CHECK} Fail2ban уже установлен - пропускаем${NC}"
+        echo -e "${BLUE}[${CYAN}1/4${BLUE}]${NC} ${GREEN}${ICON_CHECK} Fail2ban уже установлен - пропускаем${NC}"
         echo ""
       fi
       
       # Шаг 2: Настройка SSH защиты
-      echo -e "${BLUE}[${CYAN}2/3${BLUE}]${NC} ${ICON_GEAR} Настройка SSH защиты..."
+      echo -e "${BLUE}[${CYAN}2/4${BLUE}]${NC} ${ICON_GEAR} Настройка SSH защиты..."
       detect_ssh_port
       backup_and_configure_fail2ban
       restart_fail2ban
       allow_firewall_port
       echo ""
       
-      # Шаг 3: Установка скрипта в систему
-      echo -e "${BLUE}[${CYAN}3/3${BLUE}]${NC} ${ICON_ROCKET} Установка f2b команды..."
+      # Шаг 3: Автодетект сервисов (HAProxy и др.)
+      echo -e "${BLUE}[${CYAN}3/4${BLUE}]${NC} ${ICON_GEAR} Автодетект дополнительных сервисов..."
+      auto_detect_and_enable_services
+      echo ""
+      
+      # Шаг 4: Установка скрипта в систему
+      echo -e "${BLUE}[${CYAN}4/4${BLUE}]${NC} ${ICON_ROCKET} Установка f2b команды..."
       if install_script_to_system "$VERSION_CHECK_URL"; then
         echo ""
         echo -e "${BOLD}${GREEN}${ICON_CHECK} УСТАНОВКА ЗАВЕРШЕНА!${NC}"
